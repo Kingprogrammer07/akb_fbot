@@ -1,0 +1,18 @@
+services:
+  bot:
+    image: telegram-bot:latest
+#    image: ghcr.io/vlymar-dev/aiogram-bot-template:${IMAGE_TAG}
+    restart: unless-stopped
+    container_name: bot_template
+    env_file:
+      - ../.env
+    entrypoint: ["sh", "./entrypoint.sh"]
+    volumes:
+      - bot_logs:/app/logs/bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - bot_template_net

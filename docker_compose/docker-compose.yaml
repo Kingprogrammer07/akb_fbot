@@ -1,0 +1,23 @@
+services:
+  postgres:
+    extends:
+      file: docker-compose.storages.yaml
+      service: postgres
+  redis:
+    extends:
+      file: docker-compose.storages.yaml
+      service: redis
+  bot:
+    extends:
+      file: docker-compose.services.yaml
+      service: bot
+
+networks:
+  bot_template_net:
+    name: bot_template_net
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  bot_logs:

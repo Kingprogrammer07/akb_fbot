@@ -1,0 +1,59 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Editors & IDEs
+.vscode/
+.idea/
+*.swp
+
+# Git
+.git/
+.gitignore
+.gitattributes
+.gitkeep
+
+# Python tooling
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+.pytest_cache/
+.ruff_cache/
+.python-version
+tests/
+
+# Logs and temp files
+logs/
+temp/
+*.log
+*.bak
+*.tmp
+
+# Environment files
+.env*
+
+# Docker Compose files (not needed in container)
+docker_compose/
+
+# Static/media files (unless needed)
+static/
+assets/
+var/
+*.png
+*.jpeg
+*.jpg
+*.webp
+
+# Exclude other files
+docs/
+.github/
+.DS_Store
+*.md
+LICENSE
+.pre-commit-config.yaml
+requirements-dev.txt

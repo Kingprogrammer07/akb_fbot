@@ -1,0 +1,36 @@
+# DO NOT expose ports in production for security reasons
+# Use SSH tunnel or internal network to access DB/Redis
+services:
+  postgres:
+    image: postgres:16.8-alpine
+    restart: unless-stopped
+    container_name: postgres_template
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bot_template_net
+
+  redis:
+    image: redis:7.4.2-alpine
+    restart: unless-stopped
+    container_name: redis_template
+    command: redis-server /usr/local/etc/redis/redis.conf --requirepass ${REDIS_PASSWORD}
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - ../redis.conf:/usr/local/etc/redis/redis.conf
+      - redis_data:/data
+    networks:
+      - bot_template_net
