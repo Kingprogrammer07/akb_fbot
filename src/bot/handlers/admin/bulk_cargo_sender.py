@@ -794,9 +794,9 @@ class BulkCargoSender:
                     await session.commit()
                     return
 
-                # STEP 2: GX-coded clients always go to the Xorazm branch group —
+                # STEP 2: GGX-coded clients always go to the Xorazm branch group —
                 # regardless of whether a Client row exists in the DB or has a telegram_id.
-                if client_id.upper().startswith("GX"):
+                if client_id.upper().startswith("GGX"):
                     await self._send_to_xorazm_group(session, client_id, report_data)
                     return
 
