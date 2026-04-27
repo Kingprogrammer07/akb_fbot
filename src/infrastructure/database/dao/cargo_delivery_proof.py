@@ -1,7 +1,7 @@
 """DAO for CargoDeliveryProof — warehouse take-away evidence records."""
 from typing import Sequence
 
-from sqlalchemy import distinct, func, select
+from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -103,6 +103,20 @@ class CargoDeliveryProofDAO(BaseDAO[CargoDeliveryProof]):
             .where(CargoDeliveryProof.transaction_id.in_(transaction_ids))
         )
         return set(result.scalars().all())
+
+    @staticmethod
+    async def delete_by_transaction_id(
+        session: AsyncSession,
+        transaction_id: int,
+    ) -> int:
+        """Delete all proof rows for a transaction. Returns number of rows deleted."""
+        result = await session.execute(
+            delete(CargoDeliveryProof)
+            .where(CargoDeliveryProof.transaction_id == transaction_id)
+        )
+        await session.flush()
+        return result.rowcount or 0
+
 
     @staticmethod
     async def exists_for_transaction(

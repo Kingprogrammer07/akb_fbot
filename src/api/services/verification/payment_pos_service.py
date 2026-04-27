@@ -39,6 +39,9 @@ from src.infrastructure.schemas.pos_schemas import (
     UpdateProofDeliveryMethodRequest,
     UpdateTakenStatusRequest,
 )
+from src.infrastructure.tools.s3_manager import s3_manager
+import logging
+
 from src.infrastructure.tools.datetime_utils import get_current_time
 from src.infrastructure.services.client import ClientService
 from src.api.services.verification.transaction_view_service import TransactionViewService
@@ -46,6 +49,7 @@ from src.api.services.verification.transaction_view_service import TransactionVi
 if TYPE_CHECKING:
     from src.api.dependencies import AdminJWTPayload
 
+logger = logging.getLogger(__name__)
 
 class POSPaymentError(Exception):
     """Raised when a POS bulk payment or adjustment cannot be processed."""
@@ -678,6 +682,31 @@ class PaymentPOSService:
         transaction.is_taken_away = body.is_taken_away
         transaction.taken_away_date = get_current_time() if body.is_taken_away else None
 
+        # When reverting taken-away (true -> false), drop existing warehouse delivery
+        # proofs so warehouse staff can re-mark the cargo. Snapshot deleted rows into
+        # the audit log so the original evidence (who/when/which photos) survives.
+        deleted_proofs_snapshot: list[dict] = []
+        s3_keys_to_delete: list[str] = []
+        if old_value is True and body.is_taken_away is False:
+            existing_proofs = await CargoDeliveryProofDAO.get_by_transaction_id(
+                session, transaction.id
+            )
+            for proof in existing_proofs:
+                proof_keys = list(proof.photo_s3_keys or [])
+                deleted_proofs_snapshot.append({
+                    "id": proof.id,
+                    "delivery_method": proof.delivery_method,
+                    "photo_s3_keys": proof_keys,
+                    "marked_by_admin_id": proof.marked_by_admin_id,
+                    "created_at": proof.created_at.isoformat() if proof.created_at else None,
+                })
+                s3_keys_to_delete.extend(proof_keys)
+            if existing_proofs:
+                await CargoDeliveryProofDAO.delete_by_transaction_id(
+                    session, transaction.id
+                )
+
+
         await AdminAuditLogDAO.log(
             session=session,
             action="POS_UPDATE_TAKEN_STATUS",
@@ -698,9 +727,29 @@ class PaymentPOSService:
                 else None,
                 "reason": body.reason,
                 "source_row_id": transaction.id,
+                "deleted_proofs": deleted_proofs_snapshot,
             },
         )
         await session.commit()
+        # Post-commit S3 cleanup — fire-and-forget. Audit log retains the keys so
+        # any S3 failure can be retried later without re-reading deleted DB rows.
+        if s3_keys_to_delete:
+            results = await asyncio.gather(
+                *(s3_manager.delete_file(key) for key in s3_keys_to_delete),
+                return_exceptions=True,
+            )
+            failed = [
+                key for key, ok in zip(s3_keys_to_delete, results)
+                if isinstance(ok, Exception) or ok is False
+            ]
+            if failed:
+                logger.warning(
+                    "S3 proof cleanup partial failure for tx=%s: %d/%d keys failed: %s",
+                    transaction.id,
+                    len(failed),
+                    len(s3_keys_to_delete),
+                    failed,
+                )
 
         return await PaymentPOSService._build_status_update_response(
             session,
