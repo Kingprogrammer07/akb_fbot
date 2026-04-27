@@ -15,6 +15,11 @@ from src.api.services.verification.utils import (
     get_extra_charge,
     parse_photo_file_ids,
 )
+from src.infrastructure.services.flight_mask import FlightMaskService
+from src.infrastructure.services.partner_resolver import (
+    PartnerNotFoundError,
+    get_resolver,
+)
 from src.infrastructure.tools.s3_manager import s3_manager
 
 logger = logging.getLogger(__name__)
@@ -39,18 +44,49 @@ class ReportService:
         """
         Get paginated unique flight names where is_sent_web=True.
 
-        Args:
-            session: Database session
-            client_code: Client code
-            page: Page number (1-based)
-            size: Page size
-
-        Returns:
-            List of flight name strings
+        Each real flight name is replaced with the partner-specific mask
+        before returning so the user only ever sees their alias.
         """
         offset = (page - 1) * size
-        return await FlightCargoDAO.get_unique_flights_by_client_web(
+        real_flights = await FlightCargoDAO.get_unique_flights_by_client_web(
             session, client_code, limit=size, offset=offset
+        )
+        return await self._mask_flights(session, client_code, real_flights)
+
+    async def _resolve_partner(self, session: AsyncSession, client_code: str):
+        """Best-effort partner lookup for masking; returns ``None`` on miss."""
+        try:
+            return await get_resolver().resolve_by_client_code(session, client_code)
+        except PartnerNotFoundError:
+            return None
+
+    async def _mask_flights(
+        self,
+        session: AsyncSession,
+        client_code: str,
+        real_flights: list[str],
+    ) -> list[str]:
+        """Translate each real flight name to its partner-specific mask."""
+        partner = await self._resolve_partner(session, client_code)
+        if partner is None or not real_flights:
+            return real_flights
+        out: list[str] = []
+        for real in real_flights:
+            masked = await FlightMaskService.real_to_mask(session, partner.id, real)
+            out.append(masked or real)
+        return out
+
+    async def _normalize_flight_input(
+        self, session: AsyncSession, client_code: str, flight_query: str | None
+    ) -> str | None:
+        """Translate a possibly-masked flight name to its real value for DB lookup."""
+        if not flight_query:
+            return None
+        partner = await self._resolve_partner(session, client_code)
+        if partner is None:
+            return flight_query
+        return await FlightMaskService.normalize_flight_input(
+            session, partner.id, flight_query
         )
 
     async def get_client_history(
@@ -80,9 +116,16 @@ class ReportService:
             List of report dicts ready for ReportResponse serialization
         """
         offset = (page - 1) * size
+
+        # Caller may pass either the real flight name or the partner mask.
+        # Normalise to real before hitting the DAO so cargo rows are found.
+        real_flight_filter = await self._normalize_flight_input(
+            session, client_code, flight_name
+        )
+
         records = await FlightCargoDAO.get_web_reports_by_client(
             session, client_code, limit=size, offset=offset,
-            flight_name=flight_name
+            flight_name=real_flight_filter
         )
 
         if not records:
@@ -97,7 +140,25 @@ class ReportService:
             self._enrich_record(session, record, client_code, usd_rate, extra_charge)
             for record in records
         ]
-        return await asyncio.gather(*tasks)
+        enriched = await asyncio.gather(*tasks)
+
+        # Replace real flight names with masks before returning to the API.
+        partner = await self._resolve_partner(session, client_code)
+        if partner is not None:
+            cache: dict[str, str] = {}
+            for item in enriched:
+                real = item.get("flight_name")
+                if not real:
+                    continue
+                if real in cache:
+                    item["flight_name"] = cache[real]
+                    continue
+                masked = await FlightMaskService.real_to_mask(
+                    session, partner.id, real
+                )
+                cache[real] = masked or real
+                item["flight_name"] = cache[real]
+        return enriched
 
     async def _enrich_record(
         self,

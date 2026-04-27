@@ -8,7 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.bot.filters.is_private_chat import IsPrivate
 from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.states.user_track_check import UserTrackCheckStates
+from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.services.cargo_item import CargoItemService
+from src.infrastructure.services.flight_mask import FlightMaskService
+from src.infrastructure.services.partner_resolver import (
+    PartnerNotFoundError,
+    get_resolver,
+)
 from src.infrastructure.database.models.analytics_event import AnalyticsEvent
 from src.bot.utils.decorators import handle_errors
 from src.bot.utils.safe_sender import safe_execute
@@ -114,6 +120,15 @@ async def process_track_code(
         items_in_uzbekistan = [i for i in all_items if i.get('checkin_status') == 'post']
         items_in_china      = [i for i in all_items if i.get('checkin_status') == 'pre']
 
+    # Replace each real flight name with the partner-specific mask before
+    # rendering, so the user only sees flight identifiers tied to their
+    # own partner (no leakage of the underlying real flight code).
+    await _apply_flight_mask(
+        session,
+        message.from_user.id,
+        items_in_uzbekistan + items_in_china,
+    )
+
     # 6. O'zbekistondagi yuklar (post)
     for item in items_in_uzbekistan:
         info_text = _("user-track-check-uzbekistan-info",
@@ -163,3 +178,45 @@ async def process_track_code(
         _("user-track-check-search-again"),
         reply_markup=cancel_kyb(_)
     )
+
+
+async def _apply_flight_mask(
+    session: AsyncSession,
+    telegram_id: int,
+    items: list[dict],
+) -> None:
+    """Mutate ``items`` in place, replacing ``flight_name`` with the partner mask.
+
+    The user's owning partner is resolved from their primary ``client_code``.
+    Items belonging to other partners (rare — happens when a track code is
+    shared) keep the real flight name as a defensive fallback.
+    """
+    if not items:
+        return
+    client = await ClientDAO.get_by_telegram_id(session, telegram_id)
+    primary_code = (
+        client.primary_code if client and client.primary_code else None
+    )
+    if not primary_code:
+        return
+    try:
+        partner = await get_resolver().resolve_by_client_code(session, primary_code)
+    except PartnerNotFoundError:
+        return
+
+    cache: dict[str, str] = {}
+    for item in items:
+        real = item.get("flight_name")
+        if not real:
+            continue
+        if real in cache:
+            item["flight_name"] = cache[real]
+            continue
+        masked = await FlightMaskService.real_to_mask(
+            session, partner.id, real
+        )
+        if masked:
+            cache[real] = masked
+            item["flight_name"] = masked
+        else:
+            cache[real] = real

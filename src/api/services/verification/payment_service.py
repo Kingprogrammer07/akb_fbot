@@ -87,13 +87,28 @@ class PaymentService:
         wallet_deducted = 0.0
         wallet_balance_after = 0.0
 
+        # Partial top-up: when an existing partial transaction is reused, the
+        # remaining_amount is the basis for this payment (not full expected_amount),
+        # and previously paid cash must be preserved cumulatively.
+        is_partial_topup = (
+            existing_tx is not None and existing_tx.payment_status == "partial"
+        )
+        if is_partial_topup:
+            basis = float(existing_tx.remaining_amount or expected_amount)
+            prev_paid = float(existing_tx.paid_amount or 0)
+            prev_total = float(existing_tx.total_amount or expected_amount)
+        else:
+            basis = expected_amount
+            prev_paid = 0.0
+            prev_total = expected_amount
+
         # Handle wallet balance deduction if requested
         if use_balance:
             wallet_balance_before = await ClientTransactionDAO.sum_payment_balance_difference_by_client_code(
                 session, client_code
             )
             if wallet_balance_before > 0:
-                wallet_deducted = min(wallet_balance_before, expected_amount)
+                wallet_deducted = min(wallet_balance_before, basis)
 
         # Only cash (naqt) payments automatically mark cargo as taken away.
         # Card (terminal) payments are settled electronically — the client picks
@@ -103,7 +118,7 @@ class PaymentService:
         # is_taken_away logic deferred until payment_status is known
 
         # Calculate how much the client still needs to pay in cash/online
-        cash_needed = expected_amount - wallet_deducted
+        cash_needed = basis - wallet_deducted
 
         if cash_needed <= 0:
             # Wallet fully covers the payment — no cash changes hands.
@@ -113,13 +128,13 @@ class PaymentService:
                 client_code=client_code,
                 qator_raqami=cargo_id,
                 reys=flight,
-                summa=money(expected_amount),
+                summa=money(prev_total),
                 vazn=str(weight),
                 payment_receipt_file_id=None,
                 payment_type=payment_type_db,
                 payment_status="paid",
-                paid_amount=0,  # No cash was actually paid
-                total_amount=money(expected_amount),
+                paid_amount=money(prev_paid),  # preserve previously collected cash
+                total_amount=money(prev_total),
                 remaining_amount=0.0,
                 is_taken_away=is_cash_or_card,  # Wallet covers all ' Paid ' Cash/Card takes away
                 taken_away_date=get_current_time() if is_cash_or_card else None,
@@ -128,9 +143,9 @@ class PaymentService:
             )
             await session.flush()
 
-            # pbd = 0 (cash) - expected_amount = -expected_amount
-            # This consumes wallet_deducted from the overall sum(pbd)
-            payment_balance_difference = money(-expected_amount)
+            # pbd = total cash paid - original total. For fresh: 0 - expected_amount.
+            # For partial top-up: prev_paid - prev_total (residual debt absorbed by wallet).
+            payment_balance_difference = money(prev_paid - prev_total)
             if hasattr(new_tx, "payment_balance_difference"):
                 new_tx.payment_balance_difference = payment_balance_difference
 
@@ -181,6 +196,10 @@ class PaymentService:
         remaining_amount = max(0.0, cash_needed - paid_amount)
         payment_status = "paid" if remaining_amount <= 0 else "partial"
 
+        # Cumulative paid_amount across all events for this transaction (preserves
+        # previously collected cash on partial top-ups).
+        new_paid_total = prev_paid + paid_amount
+
         # Golden Rule: Cash/Card + Paid = Taken Away
         should_take_away = is_cash_or_card and payment_status == "paid"
 
@@ -190,13 +209,13 @@ class PaymentService:
             client_code=client_code,
             qator_raqami=cargo_id,
             reys=flight,
-            summa=money(expected_amount),
+            summa=money(prev_total),
             vazn=str(weight),
             payment_receipt_file_id=None,
             payment_type=payment_type_db,
             payment_status=payment_status,
-            paid_amount=money(paid_amount),
-            total_amount=money(expected_amount),
+            paid_amount=money(new_paid_total),
+            total_amount=money(prev_total),
             remaining_amount=money(remaining_amount),
             is_taken_away=should_take_away,
             taken_away_date=get_current_time() if should_take_away else None,
@@ -205,9 +224,8 @@ class PaymentService:
         )
         await session.flush()
 
-        # pbd = cash_paid - expected_amount
-        # This absorbs wallet: sum(pbd) decreases by (expected - cash_paid) = wallet_used
-        payment_balance_difference = money(paid_amount - expected_amount)
+        # pbd = total cash paid - original total. Sum(pbd) absorbs wallet usage.
+        payment_balance_difference = money(new_paid_total - prev_total)
         if hasattr(new_tx, "payment_balance_difference"):
             new_tx.payment_balance_difference = payment_balance_difference
 

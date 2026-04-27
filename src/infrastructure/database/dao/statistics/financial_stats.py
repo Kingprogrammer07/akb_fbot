@@ -3,7 +3,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.utils.constants import AVIA_CODES, REGION_PREFIX_TO_NAME
+from src.api.utils.constants import (
+    DISTRICTS,
+    REGIONS,
+    get_district_name,
+    get_region_name,
+)
 
 
 class FinancialStatsDAO:
@@ -172,7 +177,7 @@ class FinancialStatsDAO:
         end_date: datetime | None = None,
     ) -> list[dict[str, Any]]:
         where_clause = ""
-        params = {}
+        params: dict = {}
         if start_date:
             where_clause += " AND created_at >= :start_date"
             params["start_date"] = start_date
@@ -180,16 +185,13 @@ class FinancialStatsDAO:
             where_clause += " AND created_at <= :end_date"
             params["end_date"] = end_date
 
-        # Hududlar faqat 2-harfli prefiks bo'yicha guruhlanadi (ST, SV, SS, ...).
-        # Filtr qoidalari:
-        #   1. Kamida 4 ta harf bilan boshlanishi shart (STCH3, SVBK2...) —
-        #      noma'lum qisqa kodlar (GG, SM, XX) chiqarib tashlanadi.
-        #   2. "SS" + faqat raqam (SS389) — eski admin/test kodlar, chiqariladi.
-        #      "SSSS333", "SSBL2" kabi to'g'ri tuman kodlari qabul qilinadi.
-        #   3. Tire (-) bo'lgan kodlar (eski format) o'tkazilmaydi.
+        # New code format: ``A{region}-{district}/{seq}`` for Toshkent shahar
+        # (region 01) and ``A{region}/{seq}`` for every other region.  Group
+        # by the 2-digit numeric region code (extracted from positions 2-3
+        # of the upper-cased client_code).
         sql = f"""
             SELECT
-                SUBSTRING(UPPER(client_code) FROM 1 FOR 2) AS region_code,
+                SUBSTRING(UPPER(client_code) FROM 4 FOR 2) AS region_code,
                 SUM(COALESCE(total_amount, summa)) AS revenue,
                 SUM(CASE
                     WHEN paid_amount IS NOT NULL THEN paid_amount
@@ -201,10 +203,8 @@ class FinancialStatsDAO:
             WHERE 1=1 {where_clause}
                 AND reys NOT LIKE 'WALLET_ADJ%'
                 AND reys NOT LIKE 'SYS_ADJ%'
-                AND client_code NOT LIKE '%-%'
-                AND UPPER(client_code) ~ '^[A-Z]{{4}}'
-                AND UPPER(client_code) !~ '^SS[0-9]'
-            GROUP BY SUBSTRING(UPPER(client_code) FROM 1 FOR 2)
+                AND UPPER(client_code) ~ '^AKB[0-9]{{2}}'
+            GROUP BY SUBSTRING(UPPER(client_code) FROM 4 FOR 2)
             ORDER BY revenue DESC
         """
         result = await session.execute(text(sql), params)
@@ -230,9 +230,12 @@ class FinancialStatsDAO:
             where_clause += " AND created_at <= :end_date"
             params["end_date"] = end_date
 
+        # Extract numeric region code (chars 2-3) and the optional district
+        # subcode that only Toshkent shahar codes carry (``A01-{sub}/seq``).
         sql = f"""
             SELECT
-                SUBSTRING(UPPER(client_code) FROM 1 FOR 4) AS district_code,
+                SUBSTRING(UPPER(client_code) FROM 4 FOR 2) AS region_code,
+                SUBSTRING(UPPER(client_code) FROM '^AKB[0-9]{{2}}-([0-9]+)/') AS district_subcode,
                 SUM(COALESCE(total_amount, summa))          AS revenue,
                 SUM(CASE
                     WHEN paid_amount IS NOT NULL THEN paid_amount
@@ -244,30 +247,17 @@ class FinancialStatsDAO:
             WHERE 1=1 {where_clause}
                 AND reys NOT LIKE 'WALLET_ADJ%%'
                 AND reys NOT LIKE 'SYS_ADJ%%'
-                AND client_code NOT LIKE '%%-%'
-                AND UPPER(client_code) ~ '^[A-Z]{{4}}'
-                AND UPPER(client_code) !~ '^SS[0-9]'
-            GROUP BY SUBSTRING(UPPER(client_code) FROM 1 FOR 4)
+                AND UPPER(client_code) ~ '^AKB[0-9]{{2}}'
+            GROUP BY region_code, district_subcode
             ORDER BY revenue DESC
         """
         rows = (await session.execute(text(sql), params)).mappings().all()
 
-        district_code_to_name: dict[str, str] = {
-            prefix.upper(): (
-                name_raw.replace("_t", " tumani")
-                .replace("_s", " shahri")
-                .replace("_", " ")
-                .title()
-            )
-            for name_raw, prefix in AVIA_CODES.items()
-        }
-
         result: dict[str, Any] = {}
         for row in rows:
-            dcode = row["district_code"]
-            rcode = dcode[:2]
-            region_name = REGION_PREFIX_TO_NAME.get(rcode, f"Boshqa ({rcode})")
-            district_name = district_code_to_name.get(dcode, f"Boshqa ({dcode})")
+            rcode = row["region_code"]
+            sub = row["district_subcode"]
+            region_name = REGIONS.get(rcode, get_region_name(rcode))
 
             rev  = float(row["revenue"] or 0)
             paid = float(row["paid"]    or 0)
@@ -280,9 +270,16 @@ class FinancialStatsDAO:
             region["revenue"] += rev
             region["paid"]    += paid
             region["debt"]    += debt
-            region["districts"][district_name] = {
-                "code": dcode, "revenue": rev, "paid": paid, "debt": debt
-            }
+
+            if sub:
+                dcode = f"{rcode}-{sub}"
+                district_name = (
+                    DISTRICTS[dcode]["name"] if dcode in DISTRICTS
+                    else get_district_name(dcode)
+                )
+                region["districts"][district_name] = {
+                    "code": dcode, "revenue": rev, "paid": paid, "debt": debt
+                }
 
         return dict(sorted(result.items(), key=lambda kv: kv[1]["revenue"], reverse=True))
 

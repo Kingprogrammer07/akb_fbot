@@ -11,7 +11,7 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 
 
 @router.get(
-    "/flights/{client_code}",
+    "/flights/{client_code:path}",
     response_model=list[str],
     summary="Get web-sent flight names",
     description="Returns distinct flight names where is_sent_web=True for the given client."
@@ -36,7 +36,7 @@ async def get_web_flights(
 
 
 @router.get(
-    "/history/{client_code}",
+    "/history/{client_code:path}",
     response_model=list[ReportResponse],
     summary="Get web report history",
     description="Returns cargo report history with enriched track codes for the given client."

@@ -35,7 +35,16 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aiogram.fsm.state import State, StatesGroup as _StatesGroupAlias  # noqa: F401  (re-exported below)
+from aiogram.types import Message
+
 from src.bot.filters.is_admin import IsAdmin
+from src.bot.handlers.admin._partner_alias_review import (
+    FlightAliasReview,
+    build_review,
+    render_review_keyboard,
+    render_review_text,
+)
 from src.bot.utils.flights_cache import get_flights_cache
 from src.bot.utils.google_sheets_checker import GoogleSheetsChecker
 from src.bot.utils.safe_sender import safe_execute, safe_send_message, safe_send_photo
@@ -44,8 +53,23 @@ from src.infrastructure.database.client import DatabaseClient
 from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.database.dao.expected_cargo import ExpectedFlightCargoDAO
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
-from src.infrastructure.database.dao.payment_card import PaymentCardDAO
+from src.infrastructure.database.dao.partner import PartnerDAO
+from src.infrastructure.database.dao.partner_payment_method import (
+    PartnerPaymentMethodDAO,
+)
+from src.infrastructure.database.dao.partner_static_data import (
+    PartnerStaticDataDAO,
+)
 from src.infrastructure.database.dao.static_data import StaticDataDAO
+from src.infrastructure.services.flight_mask import (
+    FlightMaskConflictError,
+    FlightMaskError,
+    FlightMaskService,
+)
+from src.infrastructure.services.partner_resolver import (
+    PartnerNotFoundError,
+    get_resolver,
+)
 from src.infrastructure.tools.s3_manager import s3_manager
 
 if TYPE_CHECKING:
@@ -74,6 +98,8 @@ class BulkSendStates(StatesGroup):
     """FSM states for bulk cargo sending workflow."""
 
     selecting_flight = State()
+    reviewing_aliases = State()
+    editing_partner_alias = State()
     confirming_send = State()
     sending_in_progress = State()
 
@@ -200,7 +226,14 @@ class CargoItemData:
 
 @dataclass
 class CargoReportData:
-    """Data required to build and send a cargo report."""
+    """Data required to build and send a cargo report.
+
+    ``flight_name`` is always the **real** flight name (used for DB writes,
+    success/fail logs, mark_as_sent, transactions).  ``display_flight_name``
+    is what is rendered in the message body delivered to end users — it is
+    the partner-specific mask resolved via ``FlightMaskService``.  When no
+    mask is configured both fields are equal.
+    """
 
     CAPTION_LIMIT: int = field(default=1000, init=False, repr=False)
 
@@ -221,6 +254,17 @@ class CargoReportData:
     photo_file_ids: list[str]
     cargo_ids: list[int]
     flight_name: str
+    display_flight_name: str = ""
+    payment_links: list[tuple[str, str]] = field(default_factory=list)
+    """Optional list of ``(label, url)`` tuples for online-payment providers
+    (Click, Payme, …) supplied via ``partner_payment_methods``.  Rendered
+    after the card block and **only** when the partner has at least one
+    active link configured."""
+
+    def __post_init__(self) -> None:
+        if not self.display_flight_name:
+            # Default: render real name when no mask was provided.
+            self.display_flight_name = self.flight_name
 
     @property
     def total_price_uzs(self) -> float:
@@ -233,10 +277,10 @@ class CargoReportData:
         return self.total_price_uzs + self.extra_charge
 
     def build_message(self) -> str:
-        """Build the FULL message text for the cargo report (track codes + itemized + totals + card)."""
+        """Build the FULL message text (uses the *display* flight name)."""
         # Escape all user-supplied strings so stray '<', '>', '&' characters
         # in track codes, client IDs, or names do not break Telegram's HTML parser.
-        safe_flight = html_module.escape(self.flight_name)
+        safe_flight = html_module.escape(self.display_flight_name)
         safe_client = html_module.escape(self.client_id)
 
         # Build track codes section (shown at the top, ALL codes)
@@ -262,6 +306,15 @@ class CargoReportData:
                 f"👤 Karta egasi: {html_module.escape(self.payment_card_holder or '')}\n"
             )
 
+        link_info = ""
+        if self.payment_links:
+            link_lines = "\n".join(
+                f"🌐 <a href=\"{html_module.escape(url, quote=True)}\">"
+                f"{html_module.escape(label)}</a>"
+                for label, url in self.payment_links
+            )
+            link_info = f"{link_lines}\n"
+
         message = (
             f"Assalomu aleykum. Yuqorida {safe_flight} - reysimizda kelgan "
             f"tovarlaringiz trek kodlari va foto hisoboti tashlandi.\n\n"
@@ -271,6 +324,7 @@ class CargoReportData:
             f"<b>Jami vazn:</b> {self.total_weight:.2f} kg\n"
             f"<b>JAMI TO'LOV:</b> {self.total_payment:,.0f} so'm\n\n"
             f"{card_info}"
+            f"{link_info}"
         )
 
         if self.foto_hisobot:
@@ -794,13 +848,34 @@ class BulkCargoSender:
                     await session.commit()
                     return
 
-                # STEP 2: GGX-coded clients always go to the Xorazm branch group —
-                # regardless of whether a Client row exists in the DB or has a telegram_id.
-                if client_id.upper().startswith("GGX"):
-                    await self._send_to_xorazm_group(session, client_id, report_data)
+                # STEP 2: Resolve the owning partner from the prefix.  Non-DM
+                # partners (including ``GGX`` for the AKB Xorazm filiali) are
+                # forwarded to ``partner.group_chat_id``; DM partners (AKB)
+                # fall through to the direct-message flow below.
+                try:
+                    partner = await get_resolver().resolve_by_client_code(
+                        session, client_id
+                    )
+                except PartnerNotFoundError as exc:
+                    error_reason = f"Partner not registered: {exc!s}"
+                    self.stats.failed += 1
+                    self.stats.add_error(client_id, self.flight_name, error_reason)
+                    await self.channel_logger.log_failure(
+                        self.flight_name,
+                        client_id,
+                        error_reason,
+                        message_text=report_data.build_message(),
+                        photo_file_ids=report_data.photo_file_ids,
+                    )
                     return
 
-                # STEP 3: Check if we can send to user (requires telegram_id)
+                if not partner.is_dm_partner:
+                    await self._send_to_partner_group(
+                        session, partner, client_id, report_data
+                    )
+                    return
+
+                # STEP 3: AKB DM flow — requires telegram_id
                 if not report_data.telegram_id:
                     # Cannot send to user -> Log failure with Manual Confirm button
                     error_reason = "Client not found or no telegram_id"
@@ -919,8 +994,55 @@ class BulkCargoSender:
                 track_codes.append(code)
                 seen_upper.add(code.upper())
 
-        # Get payment card
-        payment_card = await PaymentCardDAO.get_random_active(session)
+        # Resolve the partner-specific payment methods (cards + links).  The
+        # resolver is called once more here even though _process_client also
+        # uses it; PartnerResolver's internal cache makes this a near-free
+        # dict lookup.  Falls back to the global ``payment_cards`` pool when
+        # the partner has no card configured yet — preserves current
+        # behaviour for any partner whose admin has not migrated their cards
+        # to the new ``partner_payment_methods`` table.
+        partner_payment_card = None
+        partner_payment_links: list[tuple[str, str]] = []
+        try:
+            _partner_for_payment = await get_resolver().resolve_by_client_code(
+                session, client_id
+            )
+        except PartnerNotFoundError:
+            _partner_for_payment = None
+
+        if _partner_for_payment is not None:
+            partner_payment_card = (
+                await PartnerPaymentMethodDAO.get_random_active_card(
+                    session, _partner_for_payment.id
+                )
+            )
+            partner_payment_links = [
+                (link.link_label or "", link.link_url or "")
+                for link in await PartnerPaymentMethodDAO.list_active_links(
+                    session, _partner_for_payment.id
+                )
+            ]
+
+        if partner_payment_card is not None:
+            payment_card_number = partner_payment_card.card_number
+            payment_card_holder = partner_payment_card.card_holder
+        else:
+            # Partner has no active card configured.  The message renders
+            # without a card block; admins are expected to add at least one
+            # method via the admin panel before the next send.
+            payment_card_number = None
+            payment_card_holder = None
+
+        # Per-partner foto_hisobot override.  Empty string in the per-partner
+        # row means "no override"; fall back to the singleton ``StaticData``
+        # value (already resolved by the caller and passed in as foto_hisobot).
+        partner_foto_hisobot = foto_hisobot
+        if _partner_for_payment is not None:
+            psd = await PartnerStaticDataDAO.get_for_partner(
+                session, _partner_for_payment.id
+            )
+            if psd and psd.foto_hisobot:
+                partner_foto_hisobot = psd.foto_hisobot
 
         # Calculate totals
         total_weight = sum(item.weight for item in items)
@@ -933,6 +1055,25 @@ class BulkCargoSender:
         if not photo_file_ids:
             return None
 
+        # Resolve the partner-specific mask for this client so the message
+        # body shows the alias rather than the real flight code.  The DAO
+        # returns ``None`` when no alias has been configured (which the
+        # admin-side review flow normally guarantees), in which case the
+        # CargoReportData default falls back to the real flight name.
+        display_flight = self.flight_name
+        try:
+            partner = await get_resolver().resolve_by_client_code(
+                session, client_id
+            )
+        except PartnerNotFoundError:
+            partner = None
+        if partner is not None:
+            mask = await FlightMaskService.real_to_mask(
+                session, partner.id, self.flight_name
+            )
+            if mask:
+                display_flight = mask
+
         return CargoReportData(
             client_id=client_id,
             telegram_id=telegram_id,
@@ -941,12 +1082,14 @@ class BulkCargoSender:
             items=items,  # Individual cargo items (no track codes)
             total_weight=total_weight,
             extra_charge=extra_charge,
-            payment_card_number=payment_card.card_number if payment_card else None,
-            payment_card_holder=payment_card.full_name if payment_card else None,
-            foto_hisobot=foto_hisobot,
+            payment_card_number=payment_card_number,
+            payment_card_holder=payment_card_holder,
+            foto_hisobot=partner_foto_hisobot,
             photo_file_ids=photo_file_ids,
             cargo_ids=cargo_ids,
             flight_name=self.flight_name,
+            display_flight_name=display_flight,
+            payment_links=partner_payment_links,
         )
 
     async def _fetch_cargos(self, session: AsyncSession, cargo_ids: list[int]) -> list:
@@ -1219,23 +1362,35 @@ class BulkCargoSender:
 
         await session.commit()
 
-    async def _send_to_xorazm_group(
+    async def _send_to_partner_group(
         self,
         session: AsyncSession,
+        partner,
         client_id: str,
         report_data: CargoReportData,
     ) -> None:
-        """
-        Send cargo report to AKB_XORAZM_FILIALI_GROUP_ID.
+        """Forward a cargo report to a non-DM partner's Telegram group.
 
-        Invoked for ALL GX-coded clients — regardless of whether a Client row
-        exists in the DB or the client has a telegram_id.  The branch staff
-        handle delivery / follow-up for these clients directly in the group.
-        On success the cargos are marked as sent (identical to the normal path).
+        ``partner.is_dm_partner`` is False here.  When ``group_chat_id`` is
+        not configured the send fails loudly so the admin notices and adds
+        the missing ID via the partner admin panel.
         """
-        group_id: int = config.telegram.AKB_XORAZM_FILIALI_GROUP_ID
+        group_id = partner.group_chat_id
+        if not group_id:
+            error_reason = (
+                f"Partner {partner.code!r} has no group_chat_id configured"
+            )
+            self.stats.failed += 1
+            self.stats.add_error(client_id, self.flight_name, error_reason)
+            await self.channel_logger.log_failure(
+                self.flight_name,
+                client_id,
+                error_reason,
+                message_text=report_data.build_message(),
+                photo_file_ids=report_data.photo_file_ids,
+            )
+            return
 
-        # No payment keyboard in group context — it is a user-facing widget only.
         result = await self._send_report(
             report_data,
             override_chat_id=group_id,
@@ -1246,7 +1401,8 @@ class BulkCargoSender:
             await self._mark_as_sent(session, report_data)
             self.stats.sent += 1
             logger.info(
-                "_send_to_xorazm_group: client=%r flight=%r forwarded to group %d",
+                "_send_to_partner_group: partner=%r client=%r flight=%r → group %d",
+                partner.code,
                 client_id,
                 self.flight_name,
                 group_id,
@@ -1262,12 +1418,14 @@ class BulkCargoSender:
             error_reason = result.get("error", "Guruhga yuborishda noma'lum xato")
             self.stats.failed += 1
             self.stats.add_error(
-                client_id, self.flight_name, f"GX→guruh xato: {error_reason}"
+                client_id,
+                self.flight_name,
+                f"{partner.code}→guruh xato: {error_reason}",
             )
             await self.channel_logger.log_failure(
                 self.flight_name,
                 client_id,
-                f"GX client — guruhga yuborishda xato: {error_reason}",
+                f"{partner.display_name} guruhiga yuborishda xato: {error_reason}",
                 message_text=report_data.build_message(),
                 photo_file_ids=report_data.photo_file_ids,
             )
@@ -1424,6 +1582,182 @@ async def select_flight(
         total_cargos=total_cargos,
     )
 
+    # Build the per-partner mask review (auto-generates default aliases for
+    # any partner that does not yet have one for this flight).
+    review = await build_review(
+        session, real_flight_name=flight_name, client_codes=clients_data.keys()
+    )
+    await session.commit()
+
+    await callback.message.delete()
+
+    await _render_review_screen(bot, callback.from_user.id, flight_name, review)
+    await state.set_state(BulkSendStates.reviewing_aliases)
+
+
+# ──────────────────────────────────────────────────────────────
+# Per-partner alias review handlers
+# ──────────────────────────────────────────────────────────────
+
+
+async def _render_review_screen(
+    bot: Bot,
+    chat_id: int,
+    flight_name: str,
+    review: FlightAliasReview,
+    extra_note: str | None = None,
+) -> None:
+    """Render the alias review screen (used both initially and after edits)."""
+    text = render_review_text(review)
+    if extra_note:
+        text = f"{extra_note}\n\n{text}"
+    keyboard = render_review_keyboard(
+        review,
+        edit_callback_prefix="bulk_alias_edit",
+        proceed_callback="bulk_alias_proceed",
+        cancel_callback="bulk_cancel",
+    )
+    await safe_send_message(
+        bot,
+        chat_id=chat_id,
+        text=text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(
+    F.data.startswith("bulk_alias_edit:"),
+    BulkSendStates.reviewing_aliases,
+    IsAdmin(),
+)
+async def alias_edit_prompt(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+):
+    """Admin chose a partner row → ask for the new mask."""
+    await callback.answer()
+    try:
+        partner_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Noto'g'ri partner ID", show_alert=True)
+        return
+
+    partner = await PartnerDAO.get_by_id(session, partner_id)
+    if partner is None:
+        await callback.answer("❌ Partner topilmadi", show_alert=True)
+        return
+
+    data = await state.get_data()
+    flight_name = data.get("flight_name")
+    if not flight_name:
+        await callback.answer("❌ Reys topilmadi, qaytadan boshlang", show_alert=True)
+        await state.clear()
+        return
+
+    current_mask = await FlightMaskService.real_to_mask(
+        session, partner.id, flight_name
+    )
+
+    await state.update_data(editing_partner_id=partner.id)
+    await state.set_state(BulkSendStates.editing_partner_alias)
+
+    await callback.message.delete()
+    await safe_send_message(
+        bot,
+        chat_id=callback.from_user.id,
+        text=(
+            f"✏️ <b>{html_module.escape(partner.display_name)}</b> "
+            f"({html_module.escape(partner.code)}) uchun yangi maska kiriting.\n\n"
+            f"<b>Haqiqiy reys:</b> <code>{html_module.escape(flight_name)}</code>\n"
+            f"<b>Hozirgi maska:</b> "
+            f"<code>{html_module.escape(current_mask or '— belgilanmagan —')}</code>\n\n"
+            f"Yangi maskani matn shaklida yuboring (1–100 belgi)."
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.message(BulkSendStates.editing_partner_alias, IsAdmin(), F.text)
+async def alias_edit_save(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+):
+    """Receive the new mask, validate, persist, then redraw the review."""
+    raw = (message.text or "").strip()
+    if not raw or len(raw) > 100:
+        await message.answer("❌ Maska 1–100 belgi bo'lishi kerak. Qaytadan kiriting.")
+        return
+
+    data = await state.get_data()
+    flight_name = data.get("flight_name")
+    partner_id = data.get("editing_partner_id")
+    clients_data: dict[str, list[int]] = data.get("clients_data") or {}
+
+    if not flight_name or not partner_id:
+        await message.answer("❌ Sessiya yo'qoldi. Qaytadan boshlang.")
+        await state.clear()
+        return
+
+    try:
+        await FlightMaskService.set_mask(
+            session,
+            partner_id=partner_id,
+            real_flight_name=flight_name,
+            new_mask=raw,
+        )
+        await session.commit()
+    except FlightMaskConflictError as exc:
+        await message.answer(
+            f"❌ Bu maska allaqachon band: <code>{html_module.escape(str(exc))}</code>\n"
+            f"Boshqa nom kiriting.",
+            parse_mode="HTML",
+        )
+        return
+    except FlightMaskError as exc:
+        await message.answer(f"❌ Xatolik: {exc!s}")
+        return
+
+    review = await build_review(
+        session, real_flight_name=flight_name, client_codes=clients_data.keys()
+    )
+    await state.set_state(BulkSendStates.reviewing_aliases)
+    await state.update_data(editing_partner_id=None)
+    await _render_review_screen(
+        bot,
+        message.from_user.id,
+        flight_name,
+        review,
+        extra_note="✅ Maska yangilandi.",
+    )
+
+
+@router.callback_query(
+    F.data == "bulk_alias_proceed",
+    BulkSendStates.reviewing_aliases,
+    IsAdmin(),
+)
+async def alias_proceed(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+):
+    """Admin confirmed all masks → show the final send confirmation screen."""
+    await callback.answer()
+
+    data = await state.get_data()
+    flight_name = data.get("flight_name")
+    total_clients = data.get("total_clients", 0)
+    total_cargos = data.get("total_cargos", 0)
+    if not flight_name:
+        await callback.answer("❌ Reys topilmadi, qaytadan boshlang", show_alert=True)
+        await state.clear()
+        return
+
     keyboard = _build_row_keyboard(
         [
             ("✅ Yuborish", "bulk_confirm_send"),
@@ -1432,13 +1766,12 @@ async def select_flight(
     )
 
     await callback.message.delete()
-
     await safe_send_message(
         bot,
         chat_id=callback.from_user.id,
         text=(
             f"📊 <b>Yuborish tasdigi</b>\n\n"
-            f"✈️ Reys: <b>{flight_name}</b>\n"
+            f"✈️ Reys: <b>{html_module.escape(flight_name)}</b>\n"
             f"👥 Mijozlar soni: <b>{total_clients}</b>\n"
             f"📦 Jami yuklar: <b>{total_cargos}</b>\n\n"
             f"Barcha mijozlarga foto hisobot yuborilsinmi?"

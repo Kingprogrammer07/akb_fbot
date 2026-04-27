@@ -9,9 +9,11 @@ from src.infrastructure.database.models.client import Client
 from src.infrastructure.database.models.flight_cargo import FlightCargo
 from src.infrastructure.database.models.delivery_request import DeliveryRequest
 from src.api.utils.constants import (
-    AVIA_CODES,
+    DISTRICTS,
+    REGIONS,
     UZBEKISTAN_REGIONS,
-    REGION_PREFIX_TO_NAME,
+    get_district_name,
+    get_region_name,
 )
 from src.infrastructure.tools.datetime_utils import get_current_time
 
@@ -156,21 +158,12 @@ class ClientStatsDAO:
             else datetime(2020, 1, 1)
         )
 
-        ss_numeric = re.compile(r"^SS\d+$")
-        valid_4 = re.compile(r"^[A-Z]{4}")
+        # New format helpers: extract numeric region code (chars 4-5 after
+        # the ``AKB`` partner prefix) and the district subcode that always
+        # follows the ``-`` separator (``AKB{rr}-{ds}/{seq}``).
+        akb_code_re = re.compile(r"^AKB(\d{2})-(\d+)/")
 
-        # 4-harfli district kod → tuman nomi (AVIA_CODES reversi)
-        district_code_to_name: dict[str, str] = {
-            prefix.upper(): (
-                name_raw.replace("_t", " tumani")
-                .replace("_s", " shahri")
-                .replace("_", " ")
-                .title()
-            )
-            for name_raw, prefix in AVIA_CODES.items()
-        }
-
-        # ---- Query 1: Mijozlar soni tuman bo'yicha ----
+        # ---- Query 1: Mijozlar soni hudud/tuman bo'yicha ----
         client_rows = (
             await self.session.execute(
                 select(Client.extra_code, Client.client_code).where(
@@ -179,19 +172,21 @@ class ClientStatsDAO:
             )
         ).all()
 
-        # {district_prefix: count}
-        district_counts: dict[str, int] = {}
+        # Group key: (region_code, district_subcode|"")
+        district_counts: dict[tuple[str, str], int] = {}
         for row in client_rows:
             code = (row.extra_code or row.client_code or "").upper()
-            if not valid_4.match(code) or ss_numeric.match(code):
+            m = akb_code_re.match(code)
+            if not m:
                 continue
-            dprefix = code[:4]
-            district_counts[dprefix] = district_counts.get(dprefix, 0) + 1
+            key = (m.group(1), m.group(2))
+            district_counts[key] = district_counts.get(key, 0) + 1
 
         # ---- Query 2: Moliyaviy ko'rsatkichlar tuman bo'yicha ----
         fin_sql = text("""
             SELECT
-                SUBSTRING(UPPER(client_code) FROM 1 FOR 4) AS district_code,
+                SUBSTRING(UPPER(client_code) FROM 4 FOR 2) AS region_code,
+                SUBSTRING(UPPER(client_code) FROM '^AKB[0-9]{2}-([0-9]+)/') AS district_subcode,
                 SUM(COALESCE(total_amount, summa))          AS revenue,
                 SUM(CASE
                     WHEN paid_amount IS NOT NULL THEN paid_amount
@@ -202,20 +197,17 @@ class ClientStatsDAO:
             FROM client_transaction_data
             WHERE created_at >= :start_dt
               AND created_at <= :end_dt
-              AND UPPER(client_code) ~ '^[A-Z]{4}'
-              AND UPPER(client_code) !~ '^SS[0-9]'
-              AND client_code NOT LIKE '%%-%'
+              AND UPPER(client_code) ~ '^AKB[0-9]{2}'
               AND reys NOT LIKE 'WALLET_ADJ%%'
               AND reys NOT LIKE 'SYS_ADJ%%'
-            GROUP BY SUBSTRING(UPPER(client_code) FROM 1 FOR 4)
+            GROUP BY region_code, district_subcode
         """)
         fin_rows = (
             await self.session.execute(fin_sql, {"start_dt": start_dt, "end_dt": end_dt})
         ).mappings().all()
 
-        # {district_prefix: {revenue, paid, debt}}
-        district_fin: dict[str, dict[str, float]] = {
-            row["district_code"]: {
+        district_fin: dict[tuple[str, str], dict[str, float]] = {
+            (row["region_code"], row["district_subcode"] or ""): {
                 "revenue": float(row["revenue"] or 0),
                 "paid":    float(row["paid"]    or 0),
                 "debt":    float(row["debt"]    or 0),
@@ -224,32 +216,36 @@ class ClientStatsDAO:
         }
 
         # ---- Birlashtirish: region → districts ----
-        all_dprefixes = set(district_counts) | set(district_fin)
+        all_keys = set(district_counts) | set(district_fin)
         region_map: dict[str, Any] = {}
 
-        for dprefix in all_dprefixes:
-            rprefix = dprefix[:2]
-            region_name = REGION_PREFIX_TO_NAME.get(rprefix, f"Boshqa ({rprefix})")
-            d_name = district_code_to_name.get(dprefix, f"Boshqa ({dprefix})")
-
-            fin = district_fin.get(dprefix, {"revenue": 0.0, "paid": 0.0, "debt": 0.0})
-            count = district_counts.get(dprefix, 0)
+        for rcode, sub in all_keys:
+            region_name = REGIONS.get(rcode, get_region_name(rcode))
+            fin = district_fin.get((rcode, sub), {"revenue": 0.0, "paid": 0.0, "debt": 0.0})
+            count = district_counts.get((rcode, sub), 0)
 
             region = region_map.setdefault(
                 region_name,
-                {"code": rprefix, "count": 0, "revenue": 0.0, "paid": 0.0, "debt": 0.0, "districts": {}},
+                {"code": rcode, "count": 0, "revenue": 0.0, "paid": 0.0, "debt": 0.0, "districts": {}},
             )
             region["count"]   += count
             region["revenue"] += fin["revenue"]
             region["paid"]    += fin["paid"]
             region["debt"]    += fin["debt"]
-            region["districts"][d_name] = {
-                "code":    dprefix,
-                "count":   count,
-                "revenue": fin["revenue"],
-                "paid":    fin["paid"],
-                "debt":    fin["debt"],
-            }
+
+            if sub:
+                dcode = f"{rcode}-{sub}"
+                d_name = (
+                    DISTRICTS[dcode]["name"] if dcode in DISTRICTS
+                    else get_district_name(dcode)
+                )
+                region["districts"][d_name] = {
+                    "code":    dcode,
+                    "count":   count,
+                    "revenue": fin["revenue"],
+                    "paid":    fin["paid"],
+                    "debt":    fin["debt"],
+                }
 
         # Districts ichida revenue bo'yicha tartiblash
         for region in region_map.values():

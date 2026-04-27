@@ -566,6 +566,22 @@ async def search_transactions(
             detail="Kamida bitta qidiruv parametri kerak: code, phone, name yoki q.",
         )
 
+    # Translate the partner-mask flight name (if used) to its real value
+    # before building the DAO filter — cashiers may type either form.
+    if flight and code:
+        from src.infrastructure.services.flight_mask import FlightMaskService
+        from src.infrastructure.services.partner_resolver import (
+            PartnerNotFoundError,
+            get_resolver,
+        )
+        try:
+            _partner = await get_resolver().resolve_by_client_code(session, code)
+            flight = await FlightMaskService.normalize_flight_input(
+                session, _partner.id, flight
+            )
+        except PartnerNotFoundError:
+            pass
+
     # Build combined filter_type
     if taken_status == "taken":
         dao_filter_type = "taken"

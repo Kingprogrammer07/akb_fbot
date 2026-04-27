@@ -25,9 +25,6 @@ class ClientNotifyData:
     track_codes: list[str]
     """Trek codes for this client in the selected flight."""
 
-    is_gx: bool = False
-    """True when the client code starts with 'GX' → route to Xorazm group."""
-
     def build_message(self, flight_name: str, admin_text: str) -> str:
         """Compose the personalised notification text.
 

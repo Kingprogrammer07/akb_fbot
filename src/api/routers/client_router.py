@@ -4,12 +4,11 @@ from typing import Optional
 from datetime import date
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, status, File, UploadFile, Form, Query
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from redis.asyncio import Redis
 from src.api.dependencies import get_translator, get_redis, get_admin_user
-from src.api.utils.constants import AVIA_CODES
+from src.api.utils.constants import resolve_region_code
 from src.bot.bot_instance import bot
 from src.infrastructure.database.client import DatabaseClient
 from src.infrastructure.database.dao.client import ClientDAO
@@ -210,70 +209,23 @@ async def preview_client_code_endpoint(
     Frontend'da jonli (live) tarzda keyingi bo'sh kod qanaqa bo'lishini ko'rsatish uchun API.
     Bu API bazani qulflamaydi (No LOCK).
     """
-    safe_district = str(district).strip().lower() if district else ""
-
-    # 1. Prefiksni aniqlash (AVIA_CODES lug'ati orqali)
-    assigned_prefix = AVIA_CODES.get(safe_district)
-    if not assigned_prefix and safe_district.upper() in AVIA_CODES.values():
-        assigned_prefix = safe_district.upper()
-    if not assigned_prefix:
-        assigned_prefix = "NON"  # Belgilangan prefiks topilmasa
-
-    # 2. Logika: Toshkent (1 dan) vs Viloyatlar (30 dan)
-    is_tashkent = assigned_prefix.startswith("ST")
-    start_number = 1 if is_tashkent else 30
-
-    if is_tashkent:
-        regex_pattern = f"^{assigned_prefix}[0-9]+$"
-    else:
-        region_base = assigned_prefix[:2]
-        regex_pattern = f"^{region_base}[A-Z]*[0-9]+$"
-
-    params = {
-        "start": start_number,
-        "regex_pattern": regex_pattern
-    }
-
-    # 3. SQL so'rovi (LOCK siz, faqat client_code va extra_code)
-    query = text("""
-    WITH target_codes AS (
-        SELECT client_code AS code FROM clients WHERE client_code IS NOT NULL
-        UNION ALL
-        SELECT extra_code AS code FROM clients WHERE extra_code IS NOT NULL
-    ),
-    nums AS (
-        SELECT CAST(SUBSTRING(UPPER(code) FROM '[0-9]+') AS INT) AS num
-        FROM target_codes
-        WHERE UPPER(code) ~ :regex_pattern
+    from src.api.utils.code_generator import (
+        PARTNER_PREFIX,
+        build_code_pattern,
+        preview_client_code,
     )
-    SELECT COALESCE(
-        -- Eng kichik bo'shliqni qidirish
-        (SELECT n.num + 1
-         FROM nums n
-         LEFT JOIN nums n2 ON n.num + 1 = n2.num
-         WHERE n.num >= :start AND n2.num IS NULL
-         ORDER BY n.num LIMIT 1),
 
-        -- Agar bo'shliq bo'lmasa, max raqamga 1 qo'shish
-        (SELECT CASE
-            WHEN NOT EXISTS (SELECT 1 FROM nums WHERE num >= :start) THEN :start
-            ELSE MAX(num) + 1
-         END FROM nums)
-    )
-    """)
+    region_code = resolve_region_code(region)
+    is_tashkent = region_code == "01"
 
-    result = await session.execute(query, params)
-    generated_num = result.scalar_one_or_none()
+    preview_code = await preview_client_code(session, region, district)
 
-    if generated_num is None:
-        generated_num = start_number
-
-    preview_code = f"{assigned_prefix}{generated_num}"
-
+    # Reconstruct the prefix shown to the frontend (everything before "/seq").
+    prefix_only = preview_code.rsplit("/", 1)[0] if "/" in preview_code else preview_code
     return CodePreviewResponse(
         preview_code=preview_code,
-        prefix=assigned_prefix,
-        is_tashkent=is_tashkent
+        prefix=prefix_only,
+        is_tashkent=is_tashkent,
     )
 
 

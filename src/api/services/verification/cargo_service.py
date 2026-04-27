@@ -61,15 +61,10 @@ class CargoService:
         Returns:
             UnpaidCargoListResponse with paginated items
         """
-        # Get all unpaid items
+        # Get unpaid items (filter applied at source: 'all' includes partial, 'pending' excludes it)
         all_unpaid = await get_unpaid_cargo_items(
-            client_code, session, flight_filter
+            client_code, session, flight_filter, filter_type
         )
-
-        # Apply filter (for unpaid, only 'pending' makes sense, but keep 'all' for consistency)
-        if filter_type == "pending":
-            all_unpaid = [u for u in all_unpaid if u["payment_status"] == "pending"]
-        # 'all' keeps everything
 
         # Sort by flight_name
         reverse = sort_order == "desc"
@@ -91,7 +86,7 @@ class CargoService:
                 price_per_kg=item["price_per_kg"],
                 total_payment=item["total_payment"],
                 currency="UZS",
-                payment_status="pending",
+                payment_status=item["payment_status"],
                 created_at=item["created_at"]
             )
             for item in page_items

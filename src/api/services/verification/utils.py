@@ -133,6 +133,7 @@ async def get_unpaid_cargo_items(
     client_code: str | list[str],
     session: AsyncSession,
     flight_filter: Optional[str] = None,
+    filter_type: str = "pending",
 ) -> list[dict]:
     """
     Get unpaid cargo items for a client.
@@ -167,15 +168,15 @@ async def get_unpaid_cargo_items(
         session, client_code
     )
 
-    # Create a map of processed cargo IDs (qator_raqami) to their payment status
-    cargo_status_map = {}
+    # Map cargo IDs (qator_raqami) -> transaction object to access status + remaining_amount
+    cargo_tx_map = {}
     for tx in existing_transactions:
         # If flight filter is applied, only consider transactions for that flight
         if flight_filter and tx.reys.upper() != flight_filter.upper():
             continue
         # Only consider valid qator_raqami
         if tx.qator_raqami and tx.qator_raqami > 0:
-            cargo_status_map[tx.qator_raqami] = tx.payment_status
+            cargo_tx_map[tx.qator_raqami] = tx
 
     unpaid_items = []
 
@@ -184,13 +185,16 @@ async def get_unpaid_cargo_items(
     extra_charge = await get_extra_charge(session)
 
     for cargo in sent_cargos:
-        # Check if this specific cargo has a transaction that is fully paid
-        status = cargo_status_map.get(cargo.id)
+        tx = cargo_tx_map.get(cargo.id)
+        status = tx.payment_status if tx else None
 
-        # If the cargo has a transaction that is "paid" or "partial", skip it for POS bulk logic.
-        # "partial" transactions should be completed via the existing transactions API, not bulk POS.
-        if status in ("paid", "partial"):
+        # Fully paid: never include
+        if status == "paid":
             continue
+        # Partial: only include when filter_type == "all"
+        if status == "partial" and filter_type != "all":
+            continue
+
         # Calculate payment amount from cargo data
         weight = float(cargo.weight_kg) if cargo.weight_kg else 0.0
         price_per_kg = float(cargo.price_per_kg) if cargo.price_per_kg else 0.0
@@ -202,13 +206,21 @@ async def get_unpaid_cargo_items(
         price_per_kg_uzs = price_per_kg * usd_rate
         total_amount = weight * price_per_kg_uzs + extra_charge
 
+        # For partial txs use remaining_amount so cashier collects only what's left
+        if status == "partial":
+            display_amount = float(tx.remaining_amount or 0)
+            item_status = "partial"
+        else:
+            display_amount = total_amount
+            item_status = "pending"
+
         unpaid_item = {
             "cargo_id": cargo.id,
             "flight_name": cargo.flight_name,
             "row_number": cargo.id,  # qator_raqami = cargo.id
-            "total_payment": total_amount,
+            "total_payment": display_amount,
             "weight": weight,
-            "payment_status": "pending",
+            "payment_status": item_status,
             "price_per_kg": price_per_kg,
             "price_per_kg_uzs": price_per_kg_uzs,
             "usd_rate": usd_rate,

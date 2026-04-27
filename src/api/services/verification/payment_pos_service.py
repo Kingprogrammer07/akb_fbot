@@ -146,6 +146,33 @@ class PaymentPOSService:
                     failed_cargo_id=item.cargo_id,
                 )
 
+            # The cashier may have typed either the real flight code or the
+            # partner-specific mask shown to the client.  Translate the input
+            # to the real name so all downstream lookups (cargo ownership,
+            # transaction de-duplication, ledger writes) hit canonical data.
+            try:
+                from src.infrastructure.services.flight_mask import (
+                    FlightMaskService,
+                )
+                from src.infrastructure.services.partner_resolver import (
+                    PartnerNotFoundError,
+                    get_resolver,
+                )
+                _partner = await get_resolver().resolve_by_client_code(
+                    session, item.client_code
+                )
+                normalized = await FlightMaskService.normalize_flight_input(
+                    session, _partner.id, item.flight
+                )
+                # Mutate the validated request item in place; downstream
+                # references already use ``item.flight`` directly.
+                if normalized != item.flight:
+                    item.flight = normalized
+            except PartnerNotFoundError:
+                # Unknown prefix → keep the input as-is so callers can still
+                # see the raw error rather than a misleading masking failure.
+                pass
+
             cargo_data = await get_cargo_details(item.cargo_id, session)
             if not cargo_data:
                 raise POSPaymentError(
@@ -165,11 +192,11 @@ class PaymentPOSService:
             duplicate_tx = await ClientTransactionDAO.get_by_client_code_flight_row(
                 session, client.active_codes, item.flight, item.cargo_id
             )
-            if duplicate_tx and duplicate_tx.payment_status in ("paid", "partial"):
+            if duplicate_tx and duplicate_tx.payment_status == "paid":
                 raise POSPaymentError(
                     message=(
                         f"{human_idx}-element: {item.cargo_id} raqamli yuk uchun to'lov "
-                        f"allaqachon amalga oshirilgan yoki qisman to'langan (tranzaksiya #{duplicate_tx.id})."
+                        f"allaqachon to'liq amalga oshirilgan (tranzaksiya #{duplicate_tx.id})."
                     ),
                     failed_cargo_id=item.cargo_id,
                 )

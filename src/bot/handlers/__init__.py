@@ -17,6 +17,7 @@ from src.bot.handlers.admin.settings import settings_router
 from src.bot.handlers.admin.get_data import get_data_router
 from src.bot.handlers.admin.leftover_cargo import leftover_cargo_router
 from src.bot.handlers.admin.etijorat_admin import etijorat_admin_router
+from src.bot.handlers.admin.partners import partners_admin_router
 from src.bot.handlers.commands import commands_router
 from src.bot.handlers.language import language_router
 from src.bot.handlers.user.messages import user_messages_router
@@ -48,6 +49,7 @@ ROUTERS = [
     get_data_router,  # Admin get client data
     leftover_cargo_router,  # Admin leftover cargo export
     settings_router,  # Admin settings
+    partners_admin_router,  # Admin partner CRUD (/partners)
     admin_messages_router,
     approval_router,
     payment_approval_router,

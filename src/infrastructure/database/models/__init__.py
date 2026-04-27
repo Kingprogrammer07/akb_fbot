@@ -32,6 +32,15 @@ from src.infrastructure.database.models.partner_shipment_temp import PartnerShip
 from src.infrastructure.database.models.expected_cargo import ExpectedFlightCargo
 from src.infrastructure.database.models.flight_schedule import FlightSchedule
 
+# ── Partner masking models (Phase 1) ────────────────────────────────────────
+from src.infrastructure.database.models.partner import Partner
+from src.infrastructure.database.models.partner_flight_alias import PartnerFlightAlias
+from src.infrastructure.database.models.partner_payment_method import (
+    PartnerPaymentMethod,
+    PartnerPaymentMethodType,
+)
+from src.infrastructure.database.models.partner_static_data import PartnerStaticData
+
 __all__ = [
     # Existing models
     "Client",
@@ -66,4 +75,10 @@ __all__ = [
     "PartnerShipmentTemp",
     "ExpectedFlightCargo",
     "FlightSchedule",
+    # Partner masking models
+    "Partner",
+    "PartnerFlightAlias",
+    "PartnerPaymentMethod",
+    "PartnerPaymentMethodType",
+    "PartnerStaticData",
 ]

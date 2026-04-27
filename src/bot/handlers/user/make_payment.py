@@ -25,6 +25,11 @@ from src.infrastructure.services import (
     PaymentCardService,
     ClientTransactionService,
 )
+from src.infrastructure.services.flight_mask import FlightMaskService
+from src.infrastructure.services.partner_resolver import (
+    PartnerNotFoundError,
+    get_resolver,
+)
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.s3_manager import s3_manager
 from src.infrastructure.tools.image_optimizer import optimize_image_to_webp
@@ -74,6 +79,31 @@ async def _get_random_card(session: AsyncSession, callback_or_message, _: callab
         else:
             await callback_or_message.answer(_("payment-no-cards"))
     return card
+
+
+async def _display_flight(
+    session: AsyncSession,
+    client,
+    real_flight_name: str,
+) -> str:
+    """Translate a real flight name to the partner-specific mask for the
+    given client.  Falls back to the real name when the client's prefix
+    is not registered or when no alias exists yet — the user still sees
+    *something* without breaking flows mid-payment.
+    """
+    if not real_flight_name:
+        return real_flight_name
+    primary = client.primary_code if client else None
+    if not primary:
+        return real_flight_name
+    try:
+        partner = await get_resolver().resolve_by_client_code(session, primary)
+    except PartnerNotFoundError:
+        return real_flight_name
+    masked = await FlightMaskService.real_to_mask(
+        session, partner.id, real_flight_name
+    )
+    return masked or real_flight_name
 
 
 async def _get_existing_tx(session: AsyncSession, active_codes, flight_name: str):
@@ -287,6 +317,7 @@ async def make_payment_handler(
         payment_data = await calculate_flight_payment(session, flight_name, client.active_codes, redis)
         available_flights.append({
             "flight_name": flight_name,
+            "display_flight": await _display_flight(session, client, flight_name),
             "row_number": match["row_number"],
             "total_payment": payment_data["total_payment"] if payment_data else None,
             "existing_tx": existing_tx,
@@ -299,6 +330,7 @@ async def make_payment_handler(
     builder = InlineKeyboardBuilder()
     for flight in available_flights:
         flight_name = flight["flight_name"]
+        display = flight["display_flight"]
         total_payment = flight["total_payment"]
         existing_tx = flight["existing_tx"]
 
@@ -306,20 +338,20 @@ async def make_payment_handler(
             if existing_tx and existing_tx.payment_status == "partial":
                 remaining = _parse_decimal(existing_tx.remaining_amount)
                 label = _("payment-partial-remaining")
-                button_text = f"✈️ {flight_name} - {remaining:,.2f} so'm ({label})"
+                button_text = f"✈️ {display} - {remaining:,.2f} so'm ({label})"
             else:
-                button_text = f"✈️ {flight_name} - {total_payment:,.2f} so'm"
+                button_text = f"✈️ {display} - {total_payment:,.2f} so'm"
         elif existing_tx and existing_tx.total_amount:
             # Flight from expected-cargo DB — use the recorded transaction amount
             if existing_tx.payment_status == "partial":
                 remaining = _parse_decimal(existing_tx.remaining_amount)
                 label = _("payment-partial-remaining")
-                button_text = f"✈️ {flight_name} - {remaining:,.2f} so'm ({label})"
+                button_text = f"✈️ {display} - {remaining:,.2f} so'm ({label})"
             else:
-                button_text = f"✈️ {flight_name} - {float(existing_tx.total_amount):,.2f} so'm"
+                button_text = f"✈️ {display} - {float(existing_tx.total_amount):,.2f} so'm"
         else:
             label = _("info-report-not-sent")
-            button_text = f"✈️ {flight_name} - {label}"
+            button_text = f"✈️ {display} - {label}"
 
         builder.button(text=button_text, callback_data=f"pay_flight:{flight_name}")
 
@@ -355,9 +387,10 @@ async def payment_flight_selected(
     payment_data = await calculate_flight_payment(session, flight_name, client.active_codes, redis)
 
     if not payment_data:
+        display_flight = await _display_flight(session, client, flight_name)
         no_report_text = (
             f"⚠️ <b>Hisobot yuborilmagan</b>\n\n"
-            f"✈️ Reys: <b>{flight_name}</b>\n"
+            f"✈️ Reys: <b>{display_flight}</b>\n"
             f"👤 Mijoz kodi: <b>{client.client_code}</b>\n\n"
             f"Ushbu reys uchun hali admin tomonidan foto hisobot yuborilmagan. "
             f"Iltimos, admin bilan bog'laning yoki keyinroq qayta urinib ko'ring."
@@ -482,9 +515,10 @@ async def payment_type_cash_selected(
         final_payable_amount=0,
     )
 
+    display_flight = await _display_flight(session, client, flight_name)
     confirmation_text = _(
         "payment-cash-confirmation",
-        flight_name=flight_name,
+        flight_name=display_flight,
         summa=data["summa"],
         vazn=data["vazn"],
         trek_kodlari=data.get("trek_kodlari", "N/A"),
@@ -540,10 +574,11 @@ async def pay_full_handler(
         shown_card_id=card.id,
     )
 
+    display_flight = await _display_flight(session, client, flight_name)
     payment_info = _(
         "payment-info",
         client_code=client.primary_code,
-        worksheet=flight_name,
+        worksheet=display_flight,
         summa=data["summa"],
         vazn=data["vazn"],
         trek_kodlari=data.get("trek_kodlari", "N/A"),
@@ -609,10 +644,11 @@ async def pay_full_remaining_handler(
         shown_card_id=card.id,
     )
 
+    display_flight = await _display_flight(session, client, flight_name)
     payment_info = _(
         "payment-info-remaining",
         client_code=client.primary_code,
-        worksheet=flight_name,
+        worksheet=display_flight,
         summa=f"{remaining:,.2f}",
         vazn=data["vazn"],
         trek_kodlari=data.get("trek_kodlari", "N/A"),
@@ -778,10 +814,11 @@ async def partial_amount_received(
         return
     await state.update_data(shown_card_id=card.id)
 
+    display_flight = await _display_flight(session, client, flight_name)
     payment_info = _(
         "payment-info-partial",
         client_code=client.primary_code,
-        worksheet=flight_name,
+        worksheet=display_flight,
         summa=f"{amount:,.2f}",
         vazn=data.get("vazn", "N/A"),
         trek_kodlari=data.get("trek_kodlari", "N/A"),
@@ -849,9 +886,10 @@ async def payment_wallet_toggle_handler(
             )
             builder.button(text=_("btn-payment-wallet-only"), callback_data=f"payment_wallet_only:{flight_name}")
         else:
+            display_flight_local = await _display_flight(session, client, flight_name)
             message_text = _(
                 "payment-cash-confirmation",
-                flight_name=flight_name,
+                flight_name=display_flight_local,
                 summa=f"{final_payable_amount:,.2f}" if (use_wallet and wallet_used > 0) else data.get("summa", "0"),
                 vazn=data.get("vazn", "N/A"),
                 trek_kodlari=data.get("trek_kodlari", "N/A"),
@@ -880,11 +918,12 @@ async def payment_wallet_toggle_handler(
                 "full_remaining": "payment-info-remaining",
             }.get(payment_mode, "payment-info")
 
+            display_flight_local = await _display_flight(session, client, flight_name)
             if use_wallet and wallet_used > 0:
                 message_text = _(
                     "payment-info-with-wallet",
                     client_code=client.primary_code,
-                    worksheet=flight_name,
+                    worksheet=display_flight_local,
                     summa=f"{selected_amount:,.2f}",
                     wallet_used=f"{wallet_used:,.2f}",
                     final_payable=f"{final_payable_amount:,.2f}",
@@ -897,7 +936,7 @@ async def payment_wallet_toggle_handler(
                 message_text = _(
                     template_key,
                     client_code=client.primary_code,
-                    worksheet=flight_name,
+                    worksheet=display_flight_local,
                     summa=f"{selected_amount:,.2f}",
                     vazn=data.get("vazn", "N/A"),
                     trek_kodlari=data.get("trek_kodlari", "N/A"),

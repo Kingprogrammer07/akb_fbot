@@ -43,7 +43,15 @@ async def admin_start_handler(
         await session.commit()
     
     # Send welcome message
-    is_super = bool(client and client.role == "super-admin")
+    from src.config import config
+    is_super = bool(
+        (client and client.role == "super-admin")
+        or (
+            message.from_user.id
+            and config.telegram.ADMIN_ACCESS_IDs
+            and message.from_user.id in config.telegram.ADMIN_ACCESS_IDs
+        )
+    )
     await reply_with_admin_panel(message, _("admin-welcome"), translator=_, is_super_admin=is_super)
 
 
@@ -63,7 +71,15 @@ async def admin_back_handler(
     """Handle back button - return to main menu."""
     await state.clear()
     client = await client_service.get_client(message.from_user.id, session)
-    is_super = bool(client and client.role == "super-admin")
+    from src.config import config
+    is_super = bool(
+        (client and client.role == "super-admin")
+        or (
+            message.from_user.id
+            and config.telegram.ADMIN_ACCESS_IDs
+            and message.from_user.id in config.telegram.ADMIN_ACCESS_IDs
+        )
+    )
     await reply_with_admin_panel(message, _("admin-back-to-menu"), translator=_, is_super_admin=is_super)
 
 

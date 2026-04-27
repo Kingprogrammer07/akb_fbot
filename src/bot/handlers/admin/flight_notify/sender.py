@@ -27,6 +27,13 @@ from src.bot.handlers.admin.flight_notify.models import (
 from src.bot.utils.google_sheets_checker import GoogleSheetsChecker
 from src.bot.utils.safe_sender import safe_execute, safe_send_message
 from src.config import config
+from src.infrastructure.database.client import DatabaseClient
+from src.infrastructure.database.models.partner import Partner
+from src.infrastructure.services.flight_mask import FlightMaskService
+from src.infrastructure.services.partner_resolver import (
+    PartnerNotFoundError,
+    get_resolver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +102,10 @@ class FlightNotifySender:
         # Resolved once in initialize(); None means Sheets lookup will be skipped
         self._resolved_sheet_name: str | None = None
 
+        # Per-client partner + display flight caches (populated in initialize)
+        self._partner_for_client: dict[str, Partner] = {}
+        self._display_flight_for_partner: dict[int, str] = {}
+
     async def initialize(self, progress_message_id: int) -> None:
         """Store the progress message ID and resolve the Google Sheets worksheet name.
 
@@ -114,6 +125,35 @@ class FlightNotifySender:
                 "flight_notify: could not resolve worksheet for %s — Sheets fallback disabled",
                 self.flight_name,
             )
+
+        # Resolve every client's partner and pre-load the per-partner mask
+        # for this real flight.  Done once up-front so the per-message loop
+        # never opens a DB session.
+        async with DatabaseClient(config.database.database_url) as db:
+            async with db.session_factory() as session:
+                resolver = get_resolver()
+                for client in self.clients:
+                    try:
+                        partner = await resolver.resolve_by_client_code(
+                            session, client.client_code
+                        )
+                    except PartnerNotFoundError:
+                        continue
+                    self._partner_for_client[client.client_code] = partner
+                    if partner.id not in self._display_flight_for_partner:
+                        masked = await FlightMaskService.real_to_mask(
+                            session, partner.id, self.flight_name
+                        )
+                        self._display_flight_for_partner[partner.id] = (
+                            masked or self.flight_name
+                        )
+
+    def _display_flight_for(self, client: ClientNotifyData) -> str:
+        """Return the mask for *client* (real flight as fallback)."""
+        partner = self._partner_for_client.get(client.client_code)
+        if partner is None:
+            return self.flight_name
+        return self._display_flight_for_partner.get(partner.id, self.flight_name)
 
     async def run(self) -> FlightNotifyStats:
         """Execute the send loop and return final statistics.
@@ -162,8 +202,11 @@ class FlightNotifySender:
                 client.client_code
             )
 
-        if client.is_gx:
-            await self._send_to_xorazm_group(client)
+        # Non-DM partners (Navo, Jon, Uztez, Habib, Jet, Oneway, GGX/Xorazm) →
+        # forward to the partner's group regardless of telegram_id.
+        partner = self._partner_for_client.get(client.client_code)
+        if partner is not None and not partner.is_dm_partner:
+            await self._send_to_partner_group(partner, client)
             return
 
         if client.telegram_id is None:
@@ -178,7 +221,7 @@ class FlightNotifySender:
             )
             return
 
-        message_text = client.build_message(self.flight_name, self.admin_text)
+        message_text = client.build_message(self._display_flight_for(client), self.admin_text)
         try:
             await safe_send_message(
                 self.bot,
@@ -223,13 +266,25 @@ class FlightNotifySender:
                 exc,
             )
 
-    async def _send_to_xorazm_group(self, client: ClientNotifyData) -> None:
-        """Route GX-coded clients to the AKB Xorazm branch group.
+    async def _send_to_partner_group(
+        self, partner: Partner, client: ClientNotifyData
+    ) -> None:
+        """Forward a track-code notification to a non-DM partner's group."""
+        group_id = partner.group_chat_id
+        if not group_id:
+            reason = f"Partner {partner.code!r} has no group_chat_id configured"
+            self.stats.failed += 1
+            self.stats.errors.append((client.client_code, reason))
+            await self.channel_logger.log_failure(
+                flight_name=self.flight_name,
+                client_id=client.client_code,
+                error=reason,
+            )
+            return
 
-        This mirrors the behaviour of ``BulkCargoSender._send_to_xorazm_group``.
-        """
-        group_id: int = config.telegram.AKB_XORAZM_FILIALI_GROUP_ID
-        message_text = client.build_message(self.flight_name, self.admin_text)
+        message_text = client.build_message(
+            self._display_flight_for(client), self.admin_text
+        )
         try:
             await safe_send_message(
                 self.bot,
@@ -246,7 +301,7 @@ class FlightNotifySender:
                 photo_file_ids=[],
             )
         except Exception as exc:
-            reason = f"GX→guruh xato: {exc!s}"[:120]
+            reason = f"{partner.code}→guruh xato: {exc!s}"[:120]
             self.stats.failed += 1
             self.stats.errors.append((client.client_code, reason))
             await self.channel_logger.log_failure(

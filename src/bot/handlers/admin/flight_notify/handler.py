@@ -343,7 +343,6 @@ async def _build_sample_notify_data(
         client_code=sample_code,
         telegram_id=None,  # Not needed for preview
         track_codes=track_codes,
-        is_gx=sample_code.upper().startswith("GX"),
     )
 
 
@@ -389,7 +388,6 @@ async def _resolve_clients_for_flight(
                 client_code=code,
                 telegram_id=code_to_telegram_id.get(code_upper),
                 track_codes=grouped_tracks.get(code_upper, []),
-                is_gx=code_upper.startswith("GX"),
             )
         )
     return result

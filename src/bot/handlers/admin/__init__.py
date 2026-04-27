@@ -12,6 +12,7 @@ from src.bot.handlers.admin.referral_data import referral_data_router
 from src.bot.handlers.admin.settings import settings_router
 from src.bot.handlers.admin.get_data import get_data_router
 from src.bot.handlers.admin.leftover_cargo import leftover_cargo_router
+from src.bot.handlers.admin.partners import partners_admin_router
 
 __all__ = [
     'admin_start_router',
@@ -27,4 +28,5 @@ __all__ = [
     'settings_router',
     'get_data_router',
     'leftover_cargo_router',
+    'partners_admin_router',
 ]

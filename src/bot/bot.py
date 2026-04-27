@@ -386,6 +386,8 @@ app.include_router(china_address_router, prefix="/api/v1")
 app.include_router(warehouse_router, prefix="/api/v1")
 app.include_router(shipment_router, prefix="/api/v1")
 app.include_router(expected_cargo_router, prefix="/api/v1")
+from src.api.routers.partner_router import router as partner_router
+app.include_router(partner_router, prefix="/api/v1")
 app.include_router(flight_schedule_router, prefix="/api/v1")
 app.include_router(client_stats_router, prefix="/api/v1")
 app.include_router(cargo_stats_router, prefix="/api/v1")

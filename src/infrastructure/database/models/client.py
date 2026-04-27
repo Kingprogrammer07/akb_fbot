@@ -30,10 +30,10 @@ class Client(Base):
     passport_images: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     client_code: Mapped[str | None] = mapped_column(
-        String(10), unique=True, nullable=True
+        String(20), unique=True, nullable=True
     )
     extra_code: Mapped[str | None] = mapped_column(
-        String(10), unique=True, nullable=True
+        String(20), unique=True, nullable=True
     )
 
     legacy_code: Mapped[str | None] = mapped_column(
