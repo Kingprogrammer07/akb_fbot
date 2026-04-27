@@ -81,28 +81,41 @@ async def _get_random_card(session: AsyncSession, callback_or_message, _: callab
     return card
 
 
+async def _resolve_mask(
+    session: AsyncSession, client, real_flight_name: str
+) -> str | None:
+    """Return the partner-specific mask, or ``None`` when no alias exists.
+
+    Used by callers that must hide the real flight name entirely when no
+    mask is configured yet.
+    """
+    if not real_flight_name or not client or not client.active_codes:
+        return None
+    partner = None
+    for code in client.active_codes:
+        try:
+            partner = await get_resolver().resolve_by_client_code(session, code)
+            break
+        except PartnerNotFoundError:
+            continue
+    if not partner:
+        return None
+    return await FlightMaskService.real_to_mask(
+        session, partner.id, real_flight_name
+    )
+
+
 async def _display_flight(
     session: AsyncSession,
     client,
     real_flight_name: str,
 ) -> str:
-    """Translate a real flight name to the partner-specific mask for the
-    given client.  Falls back to the real name when the client's prefix
-    is not registered or when no alias exists yet — the user still sees
-    *something* without breaking flows mid-payment.
+    """Best-effort mask lookup with a fallback to the real flight name.
+
+    Use :func:`_resolve_mask` instead when the caller must hide the real
+    name when no mask exists.
     """
-    if not real_flight_name:
-        return real_flight_name
-    primary = client.primary_code if client else None
-    if not primary:
-        return real_flight_name
-    try:
-        partner = await get_resolver().resolve_by_client_code(session, primary)
-    except PartnerNotFoundError:
-        return real_flight_name
-    masked = await FlightMaskService.real_to_mask(
-        session, partner.id, real_flight_name
-    )
+    masked = await _resolve_mask(session, client, real_flight_name)
     return masked or real_flight_name
 
 
@@ -315,9 +328,10 @@ async def make_payment_handler(
             continue  # Skip fully paid flights
 
         payment_data = await calculate_flight_payment(session, flight_name, client.active_codes, redis)
+        masked = await _resolve_mask(session, client, flight_name)
         available_flights.append({
             "flight_name": flight_name,
-            "display_flight": await _display_flight(session, client, flight_name),
+            "masked_flight": masked,
             "row_number": match["row_number"],
             "total_payment": payment_data["total_payment"] if payment_data else None,
             "existing_tx": existing_tx,
@@ -328,9 +342,11 @@ async def make_payment_handler(
         return
 
     builder = InlineKeyboardBuilder()
-    for flight in available_flights:
+    for idx, flight in enumerate(available_flights, start=1):
         flight_name = flight["flight_name"]
-        display = flight["display_flight"]
+        # When the partner has not configured a mask, fall back to a
+        # generic ordinal label so the real flight name is never leaked.
+        display = flight["masked_flight"] or f"Reys #{idx}"
         total_payment = flight["total_payment"]
         existing_tx = flight["existing_tx"]
 
@@ -387,10 +403,15 @@ async def payment_flight_selected(
     payment_data = await calculate_flight_payment(session, flight_name, client.active_codes, redis)
 
     if not payment_data:
-        display_flight = await _display_flight(session, client, flight_name)
+        # Hide the real flight name entirely when no mask alias has been
+        # configured for this client's partner; otherwise show the mask.
+        masked = await _resolve_mask(session, client, flight_name)
+        flight_line = (
+            f"✈️ Reys: <b>{masked}</b>\n" if masked else ""
+        )
         no_report_text = (
             f"⚠️ <b>Hisobot yuborilmagan</b>\n\n"
-            f"✈️ Reys: <b>{display_flight}</b>\n"
+            f"{flight_line}"
             f"👤 Mijoz kodi: <b>{client.client_code}</b>\n\n"
             f"Ushbu reys uchun hali admin tomonidan foto hisobot yuborilmagan. "
             f"Iltimos, admin bilan bog'laning yoki keyinroq qayta urinib ko'ring."
@@ -515,7 +536,7 @@ async def payment_type_cash_selected(
         final_payable_amount=0,
     )
 
-    display_flight = await _display_flight(session, client, flight_name)
+    display_flight = (await _resolve_mask(session, client, flight_name)) or "—"
     confirmation_text = _(
         "payment-cash-confirmation",
         flight_name=display_flight,
@@ -574,7 +595,7 @@ async def pay_full_handler(
         shown_card_id=card.id,
     )
 
-    display_flight = await _display_flight(session, client, flight_name)
+    display_flight = (await _resolve_mask(session, client, flight_name)) or "—"
     payment_info = _(
         "payment-info",
         client_code=client.primary_code,
@@ -644,7 +665,7 @@ async def pay_full_remaining_handler(
         shown_card_id=card.id,
     )
 
-    display_flight = await _display_flight(session, client, flight_name)
+    display_flight = (await _resolve_mask(session, client, flight_name)) or "—"
     payment_info = _(
         "payment-info-remaining",
         client_code=client.primary_code,
@@ -814,7 +835,7 @@ async def partial_amount_received(
         return
     await state.update_data(shown_card_id=card.id)
 
-    display_flight = await _display_flight(session, client, flight_name)
+    display_flight = (await _resolve_mask(session, client, flight_name)) or "—"
     payment_info = _(
         "payment-info-partial",
         client_code=client.primary_code,
@@ -886,7 +907,7 @@ async def payment_wallet_toggle_handler(
             )
             builder.button(text=_("btn-payment-wallet-only"), callback_data=f"payment_wallet_only:{flight_name}")
         else:
-            display_flight_local = await _display_flight(session, client, flight_name)
+            display_flight_local = (await _resolve_mask(session, client, flight_name)) or "—"
             message_text = _(
                 "payment-cash-confirmation",
                 flight_name=display_flight_local,
@@ -918,7 +939,7 @@ async def payment_wallet_toggle_handler(
                 "full_remaining": "payment-info-remaining",
             }.get(payment_mode, "payment-info")
 
-            display_flight_local = await _display_flight(session, client, flight_name)
+            display_flight_local = (await _resolve_mask(session, client, flight_name)) or "—"
             if use_wallet and wallet_used > 0:
                 message_text = _(
                     "payment-info-with-wallet",

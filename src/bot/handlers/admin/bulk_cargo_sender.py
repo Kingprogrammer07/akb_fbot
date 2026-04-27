@@ -852,12 +852,20 @@ class BulkCargoSender:
                 # partners (including ``GGX`` for the AKB Xorazm filiali) are
                 # forwarded to ``partner.group_chat_id``; DM partners (AKB)
                 # fall through to the direct-message flow below.
-                try:
-                    partner = await get_resolver().resolve_by_client_code(
-                        session, client_id
-                    )
-                except PartnerNotFoundError as exc:
-                    error_reason = f"Partner not registered: {exc!s}"
+                partner = None
+                _client_for_group = await ClientDAO.get_by_client_code(session, client_id)
+                _group_codes_to_try = _client_for_group.active_codes if _client_for_group else [client_id]
+                for _code in _group_codes_to_try:
+                    try:
+                        partner = await get_resolver().resolve_by_client_code(
+                            session, _code
+                        )
+                        break
+                    except PartnerNotFoundError:
+                        continue
+                
+                if partner is None:
+                    error_reason = f"Partner not registered for {client_id}"
                     self.stats.failed += 1
                     self.stats.add_error(client_id, self.flight_name, error_reason)
                     await self.channel_logger.log_failure(
@@ -1003,12 +1011,20 @@ class BulkCargoSender:
         # to the new ``partner_payment_methods`` table.
         partner_payment_card = None
         partner_payment_links: list[tuple[str, str]] = []
-        try:
-            _partner_for_payment = await get_resolver().resolve_by_client_code(
-                session, client_id
-            )
-        except PartnerNotFoundError:
-            _partner_for_payment = None
+        _partner_for_payment = None
+        
+        # Resolve client to try all aliases
+        _client_for_payment = await ClientDAO.get_by_client_code(session, client_id)
+        _codes_to_try = _client_for_payment.active_codes if _client_for_payment else [client_id]
+        
+        for _code in _codes_to_try:
+            try:
+                _partner_for_payment = await get_resolver().resolve_by_client_code(
+                    session, _code
+                )
+                break
+            except PartnerNotFoundError:
+                continue
 
         if _partner_for_payment is not None:
             partner_payment_card = (
@@ -1061,12 +1077,16 @@ class BulkCargoSender:
         # admin-side review flow normally guarantees), in which case the
         # CargoReportData default falls back to the real flight name.
         display_flight = self.flight_name
-        try:
-            partner = await get_resolver().resolve_by_client_code(
-                session, client_id
-            )
-        except PartnerNotFoundError:
-            partner = None
+        partner = None
+        _client_for_mask = await ClientDAO.get_by_client_code(session, client_id)
+        _mask_codes_to_try = _client_for_mask.active_codes if _client_for_mask else [client_id]
+        for _code in _mask_codes_to_try:
+            try:
+                partner = await get_resolver().resolve_by_client_code(session, _code)
+                break
+            except PartnerNotFoundError:
+                continue
+                
         if partner is not None:
             mask = await FlightMaskService.real_to_mask(
                 session, partner.id, self.flight_name
@@ -2192,15 +2212,38 @@ async def web_confirm_send(
             failed += 1
             continue
 
+        # Resolve the partner-specific mask before notifying — the user
+        # must never see the real flight name.  When no mask exists yet
+        # the message drops the flight identifier entirely.
+        try:
+            partner = await get_resolver().resolve_by_client_code(
+                session, client_id
+            )
+            display_flight = await FlightMaskService.real_to_mask(
+                session, partner.id, flight_name
+            )
+        except PartnerNotFoundError:
+            display_flight = None
+
+        if display_flight:
+            text_body = (
+                f"📦 Hurmatli mijoz!\n\n"
+                f"Sizga <b>{html_module.escape(display_flight)}</b> "
+                f"reysi foto hisoboti yuborildi. "
+                f"Hisobotni ko'rish uchun saytimizga kiring."
+            )
+        else:
+            text_body = (
+                f"📦 Hurmatli mijoz!\n\n"
+                f"Sizga yangi foto hisobot yuborildi. "
+                f"Hisobotni ko'rish uchun saytimizga kiring."
+            )
+
         try:
             sent = await safe_send_message(
                 bot,
                 chat_id=client.telegram_id,
-                text=(
-                    f"📦 Hurmatli mijoz!\n\n"
-                    f"Sizga <b>{flight_name}</b> reysi foto hisoboti yuborildi. "
-                    f"Hisobotni ko'rish uchun saytimizga kiring."
-                ),
+                text=text_body,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[

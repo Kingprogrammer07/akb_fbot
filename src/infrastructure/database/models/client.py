@@ -37,7 +37,7 @@ class Client(Base):
     )
 
     legacy_code: Mapped[str | None] = mapped_column(
-        String(10), unique=True, nullable=True
+        String(20), unique=True, nullable=True
     )
 
     username: Mapped[str | None] = mapped_column(

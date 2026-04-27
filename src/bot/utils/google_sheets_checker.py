@@ -258,9 +258,15 @@ class GoogleSheetsChecker:
                 - track_codes: list of all track codes (from B column)
         """
         if isinstance(client_code, list):
-            client_codes_upper_list = [c.strip().upper() for c in client_code if c]
+            flat_codes = []
+            for c in client_code:
+                if isinstance(c, list):
+                    flat_codes.extend(c)
+                else:
+                    flat_codes.append(c)
+            client_codes_upper_list = [str(c).strip().upper() for c in flat_codes if c]
         else:
-            client_codes_upper_list = [client_code.strip().upper()]
+            client_codes_upper_list = [str(client_code).strip().upper()]
 
         results: List[Dict[str, Any]] = []
 
@@ -458,9 +464,15 @@ class GoogleSheetsChecker:
             List of track codes. Empty list if not found or on error.
         """
         if isinstance(client_code, list):
-            client_codes_upper_list = [c.strip().upper() for c in client_code if c]
+            flat_codes = []
+            for c in client_code:
+                if isinstance(c, list):
+                    flat_codes.extend(c)
+                else:
+                    flat_codes.append(c)
+            client_codes_upper_list = [str(c).strip().upper() for c in flat_codes if c]
         else:
-            client_codes_upper_list = [client_code.strip().upper()]
+            client_codes_upper_list = [str(client_code).strip().upper()]
 
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:

@@ -189,9 +189,20 @@ class FinancialStatsDAO:
         # (region 01) and ``A{region}/{seq}`` for every other region.  Group
         # by the 2-digit numeric region code (extracted from positions 2-3
         # of the upper-cased client_code).
+        # New code format coexists with legacy: region grouping uses the
+        # second character of the code as the region's first letter for
+        # non-Tashkent (``ABG…`` → B = Buxoro) and the literal "01" for
+        # Tashkent (``A07-…``).  Stats are best-effort over a mixed pool;
+        # rows that do not match either pattern are excluded.
         sql = f"""
             SELECT
-                SUBSTRING(UPPER(client_code) FROM 4 FOR 2) AS region_code,
+                CASE
+                    WHEN UPPER(client_code) ~ '^A[0-9]{{2}}-' THEN
+                        SUBSTRING(UPPER(client_code) FROM 2 FOR 2)
+                    WHEN UPPER(client_code) ~ '^A[A-Z]{{2}}[0-9]+$' THEN
+                        SUBSTRING(UPPER(client_code) FROM 2 FOR 1)
+                    ELSE NULL
+                END AS region_code,
                 SUM(COALESCE(total_amount, summa)) AS revenue,
                 SUM(CASE
                     WHEN paid_amount IS NOT NULL THEN paid_amount
@@ -203,8 +214,10 @@ class FinancialStatsDAO:
             WHERE 1=1 {where_clause}
                 AND reys NOT LIKE 'WALLET_ADJ%'
                 AND reys NOT LIKE 'SYS_ADJ%'
-                AND UPPER(client_code) ~ '^AKB[0-9]{{2}}'
-            GROUP BY SUBSTRING(UPPER(client_code) FROM 4 FOR 2)
+                AND (UPPER(client_code) ~ '^A[0-9]{{2}}-'
+                     OR UPPER(client_code) ~ '^A[A-Z]{{2}}[0-9]+$')
+            GROUP BY region_code
+            HAVING region_code IS NOT NULL
             ORDER BY revenue DESC
         """
         result = await session.execute(text(sql), params)
@@ -232,10 +245,24 @@ class FinancialStatsDAO:
 
         # Extract numeric region code (chars 2-3) and the optional district
         # subcode that only Toshkent shahar codes carry (``A01-{sub}/seq``).
+        # Grouping keys depend on the format of the matched row:
+        # * ``A07-{seq}``    → Tashkent: region_code='01', district_sub='07'
+        # * ``A{R}{D}{seq}`` → other:    region_code=letter R, district_sub=letter D
         sql = f"""
             SELECT
-                SUBSTRING(UPPER(client_code) FROM 4 FOR 2) AS region_code,
-                SUBSTRING(UPPER(client_code) FROM '^AKB[0-9]{{2}}-([0-9]+)/') AS district_subcode,
+                CASE
+                    WHEN UPPER(client_code) ~ '^A[0-9]{{2}}-' THEN '01'
+                    WHEN UPPER(client_code) ~ '^A[A-Z]{{2}}[0-9]+$' THEN
+                        SUBSTRING(UPPER(client_code) FROM 2 FOR 1)
+                    ELSE NULL
+                END AS region_code,
+                CASE
+                    WHEN UPPER(client_code) ~ '^A[0-9]{{2}}-' THEN
+                        SUBSTRING(UPPER(client_code) FROM 2 FOR 2)
+                    WHEN UPPER(client_code) ~ '^A[A-Z]{{2}}[0-9]+$' THEN
+                        SUBSTRING(UPPER(client_code) FROM 3 FOR 1)
+                    ELSE NULL
+                END AS district_subcode,
                 SUM(COALESCE(total_amount, summa))          AS revenue,
                 SUM(CASE
                     WHEN paid_amount IS NOT NULL THEN paid_amount
@@ -247,8 +274,10 @@ class FinancialStatsDAO:
             WHERE 1=1 {where_clause}
                 AND reys NOT LIKE 'WALLET_ADJ%%'
                 AND reys NOT LIKE 'SYS_ADJ%%'
-                AND UPPER(client_code) ~ '^AKB[0-9]{{2}}'
+                AND (UPPER(client_code) ~ '^A[0-9]{{2}}-'
+                     OR UPPER(client_code) ~ '^A[A-Z]{{2}}[0-9]+$')
             GROUP BY region_code, district_subcode
+            HAVING region_code IS NOT NULL
             ORDER BY revenue DESC
         """
         rows = (await session.execute(text(sql), params)).mappings().all()

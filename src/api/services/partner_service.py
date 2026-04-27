@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.partner import (
+    FlightAliasCreate,
     FlightAliasRead,
     FlightAliasUpdate,
     PartnerFotoHisobotRead,
@@ -195,6 +196,33 @@ class PartnerService:
             session, partner_id, limit=limit
         )
         return [FlightAliasRead.model_validate(a) for a in aliases]
+
+    @staticmethod
+    async def create_alias(
+        session: AsyncSession,
+        partner_id: int,
+        body: FlightAliasCreate,
+    ) -> FlightAliasRead:
+        await PartnerService._assert_partner_exists(session, partner_id)
+        try:
+            alias = await FlightMaskService.set_mask(
+                session,
+                partner_id=partner_id,
+                real_flight_name=body.real_flight_name,
+                new_mask=body.mask_flight_name,
+            )
+            await session.commit()
+        except FlightMaskConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        except FlightMaskError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        return FlightAliasRead.model_validate(alias)
 
     @staticmethod
     async def update_alias(

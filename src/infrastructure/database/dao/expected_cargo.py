@@ -178,29 +178,43 @@ class ExpectedFlightCargoDAO:
     async def get_track_codes_by_flight_and_client(
         session: AsyncSession,
         flight_name: str,
-        client_code: str,
+        client_code: str | list[str],
     ) -> list[str]:
         """
         Return all track codes belonging to a specific client within a flight.
 
-        Used by the bulk cargo sender as the preferred source for track codes,
-        replacing Google Sheets lookups when expected-cargo data is available.
+        ``client_code`` accepts either a single string or a list of code
+        aliases — useful when a client has multiple historical codes
+        (legacy ``AKB570`` and new ``A02-14``) and the caller wants the
+        union.
 
-        Args:
-            session:     Open async DB session.
-            flight_name: Exact flight name (case-insensitive).
-            client_code: Client code to scope the lookup (case-insensitive).
-
-        Returns:
-            Ordered list of track_code strings (oldest first).  Empty list if
-            no records exist for this flight + client combination.
+        Returns an ordered list of track_code strings (oldest first), or
+        an empty list when no records match.
         """
+        if isinstance(client_code, list):
+            flat_codes = []
+            for c in client_code:
+                if isinstance(c, list):
+                    flat_codes.extend(c)
+                else:
+                    flat_codes.append(c)
+            codes_upper = [str(c).strip().upper() for c in flat_codes if c]
+            if not codes_upper:
+                return []
+            client_condition = func.upper(ExpectedFlightCargo.client_code).in_(
+                codes_upper
+            )
+        else:
+            client_condition = func.upper(ExpectedFlightCargo.client_code) == (
+                str(client_code).strip().upper()
+            )
+
         result = await session.execute(
             select(ExpectedFlightCargo.track_code)
             .where(
                 ExpectedFlightCargo.is_placeholder == False,  # noqa: E712
                 func.lower(ExpectedFlightCargo.flight_name) == flight_name.strip().lower(),
-                func.upper(ExpectedFlightCargo.client_code) == client_code.strip().upper(),
+                client_condition,
             )
             .order_by(ExpectedFlightCargo.created_at)
         )

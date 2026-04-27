@@ -5,6 +5,7 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import config
+from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
 from src.infrastructure.database.dao.cargo_item import CargoItemDAO
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
@@ -34,6 +35,30 @@ class ReportService:
             api_key=config.google_sheets.API_KEY
         )
 
+    async def _resolve_codes(
+        self, session: AsyncSession, client_code: str
+    ) -> list[str]:
+        """Return every code variant that maps to the same client.
+
+        ``flight_cargos.client_id`` was written under whatever code the
+        scan tooling knew at the time (legacy ``AKB570`` or pre-Phase-4e
+        ``AKB01-2/14``).  After Phase 4e conversion the URL caller uses
+        the new short form (``A02-14``) which would not match the
+        archived rows by string equality.  Looking up the client and
+        returning ``active_codes`` lets the downstream DAO filter on the
+        full set of aliases.
+        """
+        primary = (client_code or "").strip().upper()
+        if not primary:
+            return []
+        client = await ClientDAO.get_by_client_code(session, primary)
+        if not client:
+            return [primary]
+        codes = list(dict.fromkeys(c.upper() for c in client.active_codes if c))
+        if primary not in codes:
+            codes.append(primary)
+        return codes
+
     async def get_client_flights(
         self,
         session: AsyncSession,
@@ -48,17 +73,22 @@ class ReportService:
         before returning so the user only ever sees their alias.
         """
         offset = (page - 1) * size
+        codes = await self._resolve_codes(session, client_code)
         real_flights = await FlightCargoDAO.get_unique_flights_by_client_web(
-            session, client_code, limit=size, offset=offset
+            session, codes, limit=size, offset=offset
         )
         return await self._mask_flights(session, client_code, real_flights)
 
     async def _resolve_partner(self, session: AsyncSession, client_code: str):
         """Best-effort partner lookup for masking; returns ``None`` on miss."""
-        try:
-            return await get_resolver().resolve_by_client_code(session, client_code)
-        except PartnerNotFoundError:
-            return None
+        client = await ClientDAO.get_by_client_code(session, client_code)
+        codes_to_try = client.active_codes if client else [client_code]
+        for code in codes_to_try:
+            try:
+                return await get_resolver().resolve_by_client_code(session, code)
+            except PartnerNotFoundError:
+                continue
+        return None
 
     async def _mask_flights(
         self,
@@ -123,8 +153,12 @@ class ReportService:
             session, client_code, flight_name
         )
 
+        # Resolve to every code variant the client has so older
+        # flight_cargos rows (written under the pre-Phase-4e code) still
+        # match the URL's new short code.
+        codes = await self._resolve_codes(session, client_code)
         records = await FlightCargoDAO.get_web_reports_by_client(
-            session, client_code, limit=size, offset=offset,
+            session, codes, limit=size, offset=offset,
             flight_name=real_flight_filter
         )
 
@@ -137,7 +171,7 @@ class ReportService:
 
         # Process all records concurrently
         tasks = [
-            self._enrich_record(session, record, client_code, usd_rate, extra_charge)
+            self._enrich_record(session, record, client_code, codes, usd_rate, extra_charge)
             for record in records
         ]
         enriched = await asyncio.gather(*tasks)
@@ -165,25 +199,20 @@ class ReportService:
         session: AsyncSession,
         record,
         client_code: str,
+        active_codes: list[str],
         usd_rate: float,
         extra_charge: float
     ) -> dict:
         """
         Enrich a single FlightCargo record with track codes, payment, and financials.
 
-        Args:
-            session: Database session
-            record: FlightCargo ORM instance
-            client_code: Client code
-            usd_rate: Current USD to UZS rate
-            extra_charge: Extra charge from static data
-
-        Returns:
-            Dict ready for ReportResponse serialization
+        ``client_code`` is the URL identifier (used for sheets / display);
+        ``active_codes`` is the full list of historical aliases used for
+        DB lookups so legacy flight_cargos rows are not missed.
         """
         # Resolve track codes and payment in parallel
-        tracks_task = self._get_tracks(session, record.flight_name, client_code)
-        payment_task = self._get_payment_info(session, client_code, record.flight_name)
+        tracks_task = self._get_tracks(session, record.flight_name, active_codes)
+        payment_task = self._get_payment_info(session, active_codes, record.flight_name)
 
         tracks, payment_info = await asyncio.gather(tracks_task, payment_task)
 
@@ -238,47 +267,53 @@ class ReportService:
         self,
         session: AsyncSession,
         flight_name: str,
-        client_code: str
+        active_codes: list[str] | str
     ) -> list[str]:
         """
-        Resolve track codes: Google Sheets first, DB fallback, then default.
-
-        Args:
-            session: Database session
-            flight_name: Flight name
-            client_code: Client code
-
-        Returns:
-            List of track code strings (never empty — returns ["Yo'q"] as last resort)
+        Resolve track codes across every alias the client owns.  Sheets
+        is queried with the full alias list (it accepts ``list[str]``);
+        DB DAOs are iterated per-code and the union returned.
         """
-        # 1. Try Google Sheets
+        raw_codes = [active_codes] if isinstance(active_codes, str) else list(active_codes)
+        codes: list[str] = []
+        for c in raw_codes:
+            if isinstance(c, list):
+                codes.extend([str(item) for item in c if item])
+            elif c:
+                codes.append(str(c))
+                
+        if not codes:
+            return ["Yo'q"]
+
+        # 1. Try Google Sheets first — it already accepts a list of codes.
         try:
             tracks = await self.sheets_checker.get_track_codes_by_flight_and_client(
-                flight_name, client_code
+                flight_name, codes
             )
             if tracks:
                 return tracks
         except Exception as e:
-            logger.warning(f"Sheets lookup failed for {flight_name}/{client_code}: {e}")
+            logger.warning(f"Sheets lookup failed for {flight_name}/{codes}: {e}")
 
-        # 2. Fallback to CargoItemDAO
-        db_tracks = await CargoItemDAO.get_track_codes_by_flight_and_client(
-            session, flight_name, client_code
-        )
-        if db_tracks:
-            return db_tracks
+        # 2. Fallback to CargoItemDAO — single-code API, so iterate aliases.
+        for code in codes:
+            db_tracks = await CargoItemDAO.get_track_codes_by_flight_and_client(
+                session, flight_name, code
+            )
+            if db_tracks:
+                return db_tracks
 
-        # 3. Fallback to expected_flight_cargos (DB-sourced pre-arrival manifest)
+        # 3. Fallback to expected_flight_cargos (already accepts a list).
         try:
             expected_tracks = await ExpectedFlightCargoDAO.get_track_codes_by_flight_and_client(
-                session, flight_name, client_code
+                session, flight_name, codes
             )
             if expected_tracks:
                 return expected_tracks
         except Exception as e:
             logger.warning(
                 "Expected cargo track lookup failed for %s/%s: %s",
-                flight_name, client_code, e
+                flight_name, codes, e,
             )
 
         # 4. No tracks found at all
@@ -287,7 +322,7 @@ class ReportService:
     @staticmethod
     async def _get_payment_info(
         session: AsyncSession,
-        client_code: str,
+        client_code: list[str] | str,
         flight_name: str
     ) -> dict:
         """

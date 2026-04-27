@@ -159,3 +159,12 @@ class FlightAliasUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mask_flight_name: str = Field(min_length=1, max_length=100)
+
+
+class FlightAliasCreate(BaseModel):
+    """Request body for creating a new partner-flight alias."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    real_flight_name: str = Field(min_length=1, max_length=100)
+    mask_flight_name: str = Field(min_length=1, max_length=100)

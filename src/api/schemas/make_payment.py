@@ -49,9 +49,10 @@ class FlightPaymentDetailsResponse(BaseModel):
     has_existing_partial: bool = False
     existing_paid_amount: Optional[float] = None
     existing_remaining_amount: Optional[float] = None
-    # Active payment card
+    # Active payment info (Partner specific)
     card_number: Optional[str] = None
     card_owner: Optional[str] = None
+    payment_links: list[dict[str, str]] = Field(default_factory=list, description="List of payment links {'label': ..., 'url': ...}")
 
 
 # ============================================================================

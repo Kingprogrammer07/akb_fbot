@@ -1,30 +1,27 @@
 """Client-code generator.
 
 The bot is operated by AKB, so every generated code starts with the
-partner prefix ``AKB``.  Format is unified across every region:
-
-    AKB{region_code}-{district_subcode}/{seq}
-
-District is **always** part of the rendered code so ``client_code`` lines
-read identically for every region.  The sequence-numbering *scope*,
-however, varies:
+partner prefix ``A``.  Two formats are produced depending on the region:
 
 * Toshkent shahar (``region_code == "01"``)
-    seq is scoped per ``(region, district)`` — Bektemir 1, Chilonzor 1
-    and so on are all valid simultaneously.
+    → ``A{district_subcode:02d}-{seq}``
+    seq is scoped per ``(region, district)`` so different districts can
+    reuse the same number.  Example: Bektemir's 140th client →
+    ``A01-140``, Chilonzor's 3rd → ``A02-3``.
 
-* All other regions
-    seq is scoped per region — Buxoro can have at most one ``/1`` even
-    though several districts appear in its codes (Buxoro shahri, Vobkent,
-    G'ijduvon …).
+* All other regions (Toshkent viloyati included)
+    → ``A{REGION_PREFIX[2]}{seq}``
+    Each region has a hand-picked, unique 3-character prefix beginning
+    with ``A``.  seq is scoped per region — different districts within
+    the region share the same counter.  Example: Buxoro G'ijduvon →
+    ``ABU14``, Buxoro Vobkent (next registration) → ``ABU15``.
 
 The legacy free-text values stored in ``clients.region`` /
 ``clients.district`` (``"toshkent_city"``, ``"uchtepa"`` …) are translated
 to numeric codes via :mod:`src.api.utils.constants`.
 
 The generator also fills gaps: if numbers ``1, 2, 4`` are taken it returns
-``3``.  This matches the previous behaviour and keeps the code list
-contiguous over time.
+``3`` so the code list stays contiguous over time.
 """
 from __future__ import annotations
 
@@ -40,43 +37,75 @@ from src.api.utils.constants import (
 )
 
 # AKB is the only partner that registers clients via this bot.
-PARTNER_PREFIX: str = "AKB"
+PARTNER_PREFIX: str = "A"
 
-# Tashkent shahar is the single region with per-district sequence scoping.
+# Tashkent shahar is the single region with district codes embedded
+# numerically (``A07-{seq}``); other regions use a hand-picked
+# 3-character prefix shared by every district inside that region.
 _TASHKENT_REGION_CODE: str = "01"
+
+# Per-region 3-char prefixes for the non-Tashkent-shahar codes.  Each
+# entry is unique so two regions can never collide on the same prefix.
+# When adding a new region, pick a 3-char string starting with ``A``
+# that is not already in use.
+_REGION_PREFIX: dict[str, str] = {
+    "10": "ATV",  # Toshkent viloyati
+    "20": "ASR",  # Sirdaryo
+    "25": "AJZ",  # Jizzax
+    "30": "ASM",  # Samarqand
+    "40": "AFR",  # Farg'ona
+    "50": "ANM",  # Namangan
+    "60": "AAJ",  # Andijon
+    "70": "AQD",  # Qashqadaryo
+    "75": "ASD",  # Surxondaryo
+    "80": "ABX",  # Buxoro
+    "85": "ANV",  # Navoiy
+    "90": "AXR",  # Xorazm
+    "95": "AQR",  # Qoraqalpog'iston
+}
 
 
 # ---------------------------------------------------------------------------
 # Pure helpers (no DB)
 # ---------------------------------------------------------------------------
 
+
 def build_code_pattern(
     region_code: str, district_code: str
 ) -> tuple[str, str, str]:
     """Return ``(prefix, regex, scope_label)`` for the given location.
 
-    * ``prefix`` — string before the ``/`` (e.g. ``"AKB01-9"`` or ``"AKB80-12"``).
+    * ``prefix`` — string before the sequence number
+        Toshkent: ``"A07"``  → final code ``"A07-{seq}"``.
+        Others:   ``"ABU"``  → final code ``"ABU{seq}"``.
     * ``regex``  — Postgres regex anchoring the full code at this scope.
     * ``scope_label`` — human-readable description used in error messages.
-
-    For Toshkent the regex matches a single ``(region, district)`` so seq
-    numbers reset per district.  For other regions the regex matches the
-    full region (any district), so seq numbers stay unique inside the
-    region.
     """
     if not district_code:
         raise ValueError("district_code is required")
 
-    sub = _district_seq(district_code)
     if region_code == _TASHKENT_REGION_CODE:
-        prefix = f"{PARTNER_PREFIX}{region_code}-{sub}"
-        regex = f"^{prefix}/[0-9]+$"
+        sub = _district_seq(district_code)
+        try:
+            sub_num = int(sub)
+        except ValueError as exc:
+            raise ValueError(
+                f"Toshkent district subcode must be numeric, got {sub!r}"
+            ) from exc
+        prefix = f"{PARTNER_PREFIX}{sub_num:02d}"
+        regex = f"^{prefix}-[0-9]+$"
         scope = f"region={region_code}, district={district_code}"
-    else:
-        prefix = f"{PARTNER_PREFIX}{region_code}-{sub}"
-        # Region-wide scope: any district under this region counts for seq.
-        regex = f"^{PARTNER_PREFIX}{region_code}-[0-9]+/[0-9]+$"
-        scope = f"region={region_code}"
+        return prefix, regex, scope
+
+    prefix = _REGION_PREFIX.get(region_code)
+    if not prefix:
+        raise ValueError(
+            f"no region prefix configured for region_code={region_code!r}"
+        )
+    # Region-wide regex: any district under this region shares the prefix
+    # so the seq counter is unique inside the whole region.
+    regex = f"^{prefix}[0-9]+$"
+    scope = f"region={region_code} (district={district_code} ignored for prefix)"
     return prefix, regex, scope
 
 
@@ -95,9 +124,8 @@ def _normalize_inputs(
 ) -> tuple[str, str]:
     """Translate any caller-supplied region/district representation to codes.
 
-    District is required for **every** region so the rendered code shape
-    stays identical across the country.  The numeric ``district_code`` is
-    validated to belong to the resolved ``region_code``.
+    District is required for **every** region.  The numeric district
+    code is validated against ``region_code``.
     """
     region_code = resolve_region_code(region)
     if not region_code:
@@ -134,11 +162,7 @@ async def generate_client_code(
     region: str | None,
     district: str | None,
 ) -> str:
-    """Generate a fresh, unique ``client_code`` for the given location.
-
-    Acquires ``SHARE ROW EXCLUSIVE`` on ``clients`` to serialise concurrent
-    code generation; the lock is released on commit/rollback by the caller.
-    """
+    """Generate a fresh, unique ``client_code`` for the given location."""
     region_code, district_code = _normalize_inputs(region, district)
     prefix, regex, _scope = build_code_pattern(region_code, district_code)
 
@@ -146,8 +170,10 @@ async def generate_client_code(
         text("LOCK TABLE clients IN SHARE ROW EXCLUSIVE MODE")
     )
 
-    next_num = await _next_seq(session, regex)
-    return f"{prefix}/{next_num}"
+    is_tashkent = region_code == _TASHKENT_REGION_CODE
+    next_num = await _next_seq(session, regex, dash_separator=is_tashkent)
+    sep = "-" if is_tashkent else ""
+    return f"{prefix}{sep}{next_num}"
 
 
 async def preview_client_code(
@@ -155,47 +181,51 @@ async def preview_client_code(
     region: str | None,
     district: str | None,
 ) -> str:
-    """Like :func:`generate_client_code` but never takes a row lock.
-
-    Used by the ``/preview-code`` endpoint so admins can see the next code
-    live without blocking real registrations.  The returned value is
-    advisory: a concurrent registration could consume it before the admin
-    acts.  This matches the prior endpoint's behaviour.
-    """
+    """Like :func:`generate_client_code` but never takes a row lock."""
     region_code, district_code = _normalize_inputs(region, district)
     prefix, regex, _scope = build_code_pattern(region_code, district_code)
-    next_num = await _next_seq(session, regex)
-    return f"{prefix}/{next_num}"
+    is_tashkent = region_code == _TASHKENT_REGION_CODE
+    next_num = await _next_seq(session, regex, dash_separator=is_tashkent)
+    sep = "-" if is_tashkent else ""
+    return f"{prefix}{sep}{next_num}"
 
 
-async def _next_seq(session: AsyncSession, regex: str) -> int:
+async def _next_seq(
+    session: AsyncSession,
+    regex: str,
+    dash_separator: bool,
+) -> int:
     """Return the smallest free sequence number ``>= 1`` for ``regex``.
 
     Inspects both ``clients.client_code`` and ``clients.extra_code`` so a
     user with an extra code does not accidentally cause the next primary
     code to collide with their alias.
+
+    ``dash_separator`` toggles which substring grabs the numeric suffix:
+
+    * Tashkent format ``A07-150``    → match ``-([0-9]+)$``.
+    * Non-Tashkent     ``AAM120``     → match ``([0-9]+)$``.
     """
+    suffix_re = "-([0-9]+)$" if dash_separator else "([0-9]+)$"
     query = text(
-        """
+        f"""
         WITH target_codes AS (
             SELECT client_code AS code FROM clients WHERE client_code IS NOT NULL
             UNION ALL
             SELECT extra_code  AS code FROM clients WHERE extra_code  IS NOT NULL
         ),
         nums AS (
-            SELECT CAST(SUBSTRING(code FROM '/([0-9]+)$') AS INT) AS num
+            SELECT CAST(SUBSTRING(code FROM '{suffix_re}') AS INT) AS num
             FROM target_codes
             WHERE code ~ :regex
         )
         SELECT COALESCE(
-            -- 1. Smallest gap >= 1
             (SELECT n.num + 1
              FROM nums n
              LEFT JOIN nums n2 ON n.num + 1 = n2.num
              WHERE n.num >= 1 AND n2.num IS NULL
              ORDER BY n.num
              LIMIT 1),
-            -- 2. Empty set or no gap → 1 / max+1
             (SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE MAX(num) + 1 END FROM nums)
         )
         """

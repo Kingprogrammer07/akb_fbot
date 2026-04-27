@@ -345,12 +345,27 @@ async def login(
             status_code=status.HTTP_428_PRECONDITION_REQUIRED, detail="address_required"
         )
 
-    if is_address_newly_provided and not client.extra_code:
+    # Always backfill ``extra_code`` on login when it is missing.  The
+    # post-Phase-4f migration intentionally leaves ``extra_code`` empty
+    # for every imported user so the first login generates a brand-new
+    # short code without colliding with the historical ``client_code``
+    # / ``legacy_code`` aliases already on file.
+    if not client.extra_code and client.region and client.district:
         from src.api.utils.code_generator import generate_client_code
 
-        client.extra_code = await generate_client_code(
-            session, client.region, client.district
-        )
+        try:
+            client.extra_code = await generate_client_code(
+                session, client.region, client.district
+            )
+        except HTTPException as exc:
+            # Region/district could not be resolved (legacy free-text
+            # values).  Don't block login — surface a soft warning and
+            # leave extra_code empty so the user can fix their address
+            # via the profile editor.
+            logger.warning(
+                "extra_code generation skipped for client %s: %s",
+                client.id, exc.detail,
+            )
 
     # ── 3. Telegram relink ───────────────────────────────────────────────────
     client.is_logged_in = True

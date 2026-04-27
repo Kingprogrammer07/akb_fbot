@@ -38,7 +38,7 @@ def downgrade() -> None:
     op.add_column('clients', sa.Column('is_admin', sa.BOOLEAN(), server_default=sa.text('false'), autoincrement=False, nullable=False))
     op.drop_constraint(None, 'clients', type_='unique')
     op.alter_column('clients', 'legacy_code',
-               existing_type=sa.String(length=10),
+               existing_type=sa.String(length=20),
                type_=sa.VARCHAR(length=50),
                existing_nullable=True)
     op.drop_column('clients', 'role')

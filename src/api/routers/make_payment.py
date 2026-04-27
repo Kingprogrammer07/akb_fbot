@@ -40,6 +40,12 @@ from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
 from src.infrastructure.database.dao.static_data import StaticDataDAO
 from src.infrastructure.database.models.client import Client
 from src.infrastructure.services import PaymentCardService
+from src.infrastructure.database.dao.partner_payment_method import PartnerPaymentMethodDAO
+from src.infrastructure.services.flight_mask import FlightMaskService
+from src.infrastructure.services.partner_resolver import (
+    PartnerNotFoundError,
+    get_resolver,
+)
 from src.infrastructure.tools.image_optimizer import optimize_image_to_webp
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.s3_manager import s3_manager
@@ -52,6 +58,36 @@ router = APIRouter(prefix="/payments", tags=["payments"])
 # ============================================================================
 # Helpers (ported from bot handler)
 # ============================================================================
+
+
+async def _normalize_flight(
+    session: AsyncSession,
+    current_user: "Client",
+    flight_input: str,
+) -> str:
+    """Translate a partner-mask flight identifier to its real DB value.
+
+    The frontend now displays masks (e.g. ``AKB1``); this helper resolves
+    them back to the real flight name (``M196-M197``) before any cargo
+    or transaction lookup.  Returns the input unchanged when no partner
+    is registered for the user or no alias matches.
+    """
+    if not current_user.active_codes or not flight_input:
+        return flight_input
+    
+    partner = None
+    for code in current_user.active_codes:
+        try:
+            partner = await get_resolver().resolve_by_client_code(session, code)
+            break
+        except PartnerNotFoundError:
+            continue
+            
+    if not partner:
+        return flight_input
+    return await FlightMaskService.normalize_flight_input(
+        session, partner.id, flight_input
+    )
 
 
 async def _calculate_flight_payment(
@@ -219,6 +255,18 @@ async def get_available_flights(
     if not merged_flight_names:
         return AvailableFlightsResponse(flights=[], count=0)
 
+    # Resolve the partner once so each item rendered to the user shows the
+    # mask alias instead of the real flight name.  A missing partner /
+    # missing alias falls back to a generic "Reys #N" placeholder so the
+    # real identifier is never leaked.
+    partner = None
+    for code in current_user.active_codes:
+        try:
+            partner = await get_resolver().resolve_by_client_code(session, code)
+            break
+        except PartnerNotFoundError:
+            continue
+
     available: list[AvailableFlightItem] = []
 
     for flight_name in merged_flight_names:
@@ -236,6 +284,16 @@ async def get_available_flights(
             session, flight_name, current_user.active_codes, redis
         )
 
+        # Replace the real flight name with the partner-specific mask.
+        # Falls back to a generic ordinal placeholder when no alias has
+        # been configured yet so the response never leaks the real name.
+        masked: str | None = None
+        if partner is not None:
+            masked = await FlightMaskService.real_to_mask(
+                session, partner.id, flight_name
+            )
+        display = masked or f"Reys #{len(available) + 1}"
+
         if existing_tx and existing_tx.payment_status == "partial":
             remaining = (
                 float(existing_tx.remaining_amount)
@@ -244,7 +302,7 @@ async def get_available_flights(
             )
             available.append(
                 AvailableFlightItem(
-                    flight_name=flight_name,
+                    flight_name=display,
                     total_payment=payment_data["total_payment"]
                     if payment_data
                     else None,
@@ -255,7 +313,7 @@ async def get_available_flights(
         else:
             available.append(
                 AvailableFlightItem(
-                    flight_name=flight_name,
+                    flight_name=display,
                     total_payment=payment_data["total_payment"]
                     if payment_data
                     else None,
@@ -294,6 +352,18 @@ async def get_flight_details(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User has no client code assigned",
         )
+
+    # The frontend now sends the partner mask (e.g. ``AKB1``); translate
+    # to the real flight name before any cargo / transaction lookup.
+    primary = current_user.primary_code
+    if primary:
+        try:
+            partner = await get_resolver().resolve_by_client_code(session, primary)
+            flight_name = await FlightMaskService.normalize_flight_input(
+                session, partner.id, flight_name
+            )
+        except PartnerNotFoundError:
+            pass
 
     payment_data = await _calculate_flight_payment(
         session, flight_name, current_user.active_codes, redis
@@ -336,17 +406,25 @@ async def get_flight_details(
             else parse_money(str(existing_tx.remaining_amount))
         )
 
-    # Random active payment card
+    # Active payment card and links (Always AKB - Partner ID 1)
     card_number: Optional[str] = None
     card_owner: Optional[str] = None
+    payment_links: list[dict[str, str]] = []
     try:
-        payment_card_service = PaymentCardService()
-        card = await payment_card_service.get_random_active_card(session)
+        akb_partner_id = 1
+        card = await PartnerPaymentMethodDAO.get_random_active_card(session, akb_partner_id)
         if card:
             card_number = card.card_number
-            card_owner = card.full_name
+            card_owner = card.card_holder
+        
+        for link in await PartnerPaymentMethodDAO.list_active_links(session, akb_partner_id):
+            if link.link_url and link.link_label:
+                payment_links.append({
+                    "label": link.link_label,
+                    "url": link.link_url
+                })
     except Exception as e:
-        logger.warning(f"Failed to get payment card: {e}")
+        logger.warning(f"Failed to get AKB partner payment methods: {e}")
 
     total_payment = payment_data["total_payment"]
 
@@ -366,6 +444,7 @@ async def get_flight_details(
         existing_remaining_amount=existing_remaining,
         card_number=card_number,
         card_owner=card_owner,
+        payment_links=payment_links,
     )
 
 
@@ -406,6 +485,9 @@ async def submit_wallet_only(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Insufficient wallet balance ({wallet_balance:,.2f} UZS)",
         )
+
+    # Mask → real conversion before any DB lookup.
+    body.flight_name = await _normalize_flight(session, current_user, body.flight_name)
 
     # Calculate payment to get track codes & weight
     payment_data = await _calculate_flight_payment(
@@ -506,6 +588,8 @@ async def submit_cash(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User has no client code assigned",
         )
+
+    body.flight_name = await _normalize_flight(session, current_user, body.flight_name)
 
     # Calculate payment
     payment_data = await _calculate_flight_payment(
@@ -628,6 +712,8 @@ async def submit_online(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="payment_mode must be one of: full, partial, full_remaining",
         )
+
+    flight_name = await _normalize_flight(session, current_user, flight_name)
 
     # Calculate flight payment
     payment_data = await _calculate_flight_payment(

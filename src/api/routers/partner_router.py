@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import AdminJWTPayload, get_db, require_permission
 from src.api.schemas.partner import (
+    FlightAliasCreate,
     FlightAliasRead,
     FlightAliasUpdate,
     PartnerFotoHisobotRead,
@@ -192,6 +193,20 @@ async def list_aliases(
     session: AsyncSession = Depends(get_db),
 ) -> list[FlightAliasRead]:
     return await PartnerService.list_aliases(session, partner_id, limit=limit)
+
+
+@router.post(
+    "/{partner_id}/aliases",
+    response_model=FlightAliasRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[_RequireManage],
+)
+async def create_alias(
+    partner_id: int,
+    body: FlightAliasCreate,
+    session: AsyncSession = Depends(get_db),
+) -> FlightAliasRead:
+    return await PartnerService.create_alias(session, partner_id, body)
 
 
 @router.patch(

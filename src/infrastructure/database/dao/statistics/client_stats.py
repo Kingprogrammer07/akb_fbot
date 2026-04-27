@@ -158,10 +158,13 @@ class ClientStatsDAO:
             else datetime(2020, 1, 1)
         )
 
-        # New format helpers: extract numeric region code (chars 4-5 after
-        # the ``AKB`` partner prefix) and the district subcode that always
-        # follows the ``-`` separator (``AKB{rr}-{ds}/{seq}``).
-        akb_code_re = re.compile(r"^AKB(\d{2})-(\d+)/")
+        # Two new code shapes (legacy ``AKB{rr}-{ds}/{seq}`` no longer
+        # generated but may still exist in extra_code):
+        #   * ``A{rr:02d}-{seq}``   → Tashkent
+        #   * ``A{R}{D}{seq}``      → other regions, letters uppercase ASCII
+        akb_code_re = re.compile(
+            r"^(?:A(?P<tcode>\d{2})-\d+|A(?P<rletter>[A-Z])(?P<dletter>[A-Z])\d+)$"
+        )
 
         # ---- Query 1: Mijozlar soni hudud/tuman bo'yicha ----
         client_rows = (
@@ -179,14 +182,30 @@ class ClientStatsDAO:
             m = akb_code_re.match(code)
             if not m:
                 continue
-            key = (m.group(1), m.group(2))
+            if m.group("tcode") is not None:
+                # Tashkent — synthesise district code "01-{sub}" from the
+                # 2-digit subcode embedded in ``A{tcode}-…``.
+                key = ("01", str(int(m.group("tcode"))))
+            else:
+                key = (m.group("rletter"), m.group("dletter"))
             district_counts[key] = district_counts.get(key, 0) + 1
 
         # ---- Query 2: Moliyaviy ko'rsatkichlar tuman bo'yicha ----
         fin_sql = text("""
             SELECT
-                SUBSTRING(UPPER(client_code) FROM 4 FOR 2) AS region_code,
-                SUBSTRING(UPPER(client_code) FROM '^AKB[0-9]{2}-([0-9]+)/') AS district_subcode,
+                CASE
+                    WHEN UPPER(client_code) ~ '^A[0-9]{2}-' THEN '01'
+                    WHEN UPPER(client_code) ~ '^A[A-Z]{2}[0-9]+$' THEN
+                        SUBSTRING(UPPER(client_code) FROM 2 FOR 1)
+                    ELSE NULL
+                END AS region_code,
+                CASE
+                    WHEN UPPER(client_code) ~ '^A[0-9]{2}-' THEN
+                        CAST(SUBSTRING(UPPER(client_code) FROM 2 FOR 2) AS TEXT)
+                    WHEN UPPER(client_code) ~ '^A[A-Z]{2}[0-9]+$' THEN
+                        SUBSTRING(UPPER(client_code) FROM 3 FOR 1)
+                    ELSE NULL
+                END AS district_subcode,
                 SUM(COALESCE(total_amount, summa))          AS revenue,
                 SUM(CASE
                     WHEN paid_amount IS NOT NULL THEN paid_amount
@@ -197,10 +216,12 @@ class ClientStatsDAO:
             FROM client_transaction_data
             WHERE created_at >= :start_dt
               AND created_at <= :end_dt
-              AND UPPER(client_code) ~ '^AKB[0-9]{2}'
+              AND (UPPER(client_code) ~ '^A[0-9]{2}-'
+                   OR UPPER(client_code) ~ '^A[A-Z]{2}[0-9]+$')
               AND reys NOT LIKE 'WALLET_ADJ%%'
               AND reys NOT LIKE 'SYS_ADJ%%'
             GROUP BY region_code, district_subcode
+            HAVING region_code IS NOT NULL
         """)
         fin_rows = (
             await self.session.execute(fin_sql, {"start_dt": start_dt, "end_dt": end_dt})
