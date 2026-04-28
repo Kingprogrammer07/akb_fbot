@@ -49,43 +49,43 @@ class AsyncS3Manager:
 
         Key format:
             {base_folder}/{sub_folder}/{telegram_id}_{client_code}_{timestamp}_{uuid8}.{ext}
-
-        Args:
-            file_content: Raw bytes of the file.
-            file_name: Original filename (used to extract extension).
-            telegram_id: User's Telegram ID.
-            client_code: Client code; falls back to ``"NEW"`` when *None*.
-            base_folder: Top-level S3 folder (e.g. ``"extra-passports"``).
-            sub_folder: Sub-folder inside base (e.g. ``"passport_front"``).
-            content_type: MIME type for the object.
-
-        Returns:
-            The S3 object key that was written.
-
-        Raises:
-            ClientError: On AWS SDK errors.
         """
         safe_code = client_code or "NEW"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_id = uuid.uuid4().hex[:8]
-        ext = file_name.rsplit(".", 1)[-1] if "." in file_name else "jpg"
+        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "jpg"
 
-        s3_key = (
-            f"{base_folder}/{sub_folder}/"
-            f"{telegram_id}_{safe_code}_{timestamp}_{unique_id}.{ext}"
-        )
+        # sanitize path parts to avoid double slashes
+        safe_base_folder = (base_folder or "").strip().strip("/")
+        safe_sub_folder = (sub_folder or "").strip().strip("/")
 
-        async with self._session.client("s3") as s3:
-            await s3.put_object(
-                Bucket=self._bucket,
-                Key=s3_key,
-                Body=file_content,
-                ContentType=content_type,
+        file_part = f"{telegram_id}_{safe_code}_{timestamp}_{unique_id}.{ext}"
+
+        path_parts = [part for part in [safe_base_folder, safe_sub_folder, file_part] if part]
+        s3_key = "/".join(path_parts)
+
+        try:
+            async with self._session.client("s3") as s3:
+                await s3.put_object(
+                    Bucket=self._bucket,
+                    Key=s3_key,
+                    Body=file_content,
+                    ContentType=content_type,
+                )
+
+            logger.info("✅ S3 upload OK: %s", s3_key)
+            return s3_key
+
+        except ClientError as exc:
+            logger.error(
+                "❌ S3 upload failed: bucket=%s key=%s telegram_id=%s error=%s",
+                self._bucket,
+                s3_key,
+                telegram_id,
+                exc,
+                exc_info=True,
             )
-
-        logger.info("✅ S3 upload OK: %s", s3_key)
-        return s3_key
-
+            raise
     # ------------------------------------------------------------------ #
     #  Public URL helper (no network call — pure string construction)
     # ------------------------------------------------------------------ #
