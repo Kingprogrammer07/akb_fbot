@@ -15,7 +15,7 @@ import sqlalchemy as sa
 revision: str = 'create_session_logs_table'
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = '2025_12_21_001'
+depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
