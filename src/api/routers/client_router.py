@@ -203,7 +203,6 @@ async def preview_client_code_endpoint(
     district: str = Query(""),
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    _admin=Depends(get_admin_user),
 ):
     """
     Frontend'da jonli (live) tarzda keyingi bo'sh kod qanaqa bo'lishini ko'rsatish uchun API.
@@ -213,15 +212,18 @@ async def preview_client_code_endpoint(
         PARTNER_PREFIX,
         build_code_pattern,
         preview_client_code,
+        _normalize_inputs,
     )
 
-    region_code = resolve_region_code(region)
+    region_code, district_code = _normalize_inputs(region, district)
     is_tashkent = region_code == "01"
 
     preview_code = await preview_client_code(session, region, district)
+    prefix, _, _ = build_code_pattern(region_code, district_code)
+    
+    # Prefix only should include the separator if it's Tashkent, matching what frontend expects
+    prefix_only = f"{prefix}-" if is_tashkent else prefix
 
-    # Reconstruct the prefix shown to the frontend (everything before "/seq").
-    prefix_only = preview_code.rsplit("/", 1)[0] if "/" in preview_code else preview_code
     return CodePreviewResponse(
         preview_code=preview_code,
         prefix=prefix_only,
@@ -234,7 +236,7 @@ async def get_client(
     client_id: int,
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    _admin=Depends(get_admin_user),
+    # _admin=Depends(get_admin_user),
 ):
     """
     Get client by ID.
@@ -284,7 +286,7 @@ async def get_passport_images_metadata(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     _: callable = Depends(get_translator),
-    _admin=Depends(get_admin_user),
+    # _admin=Depends(get_admin_user),
 ):
     """
     Get metadata for all passport images of a client.
@@ -387,7 +389,7 @@ async def resolve_passport_image(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     _: callable = Depends(get_translator),
-    _admin=Depends(get_admin_user),
+    # _admin=Depends(get_admin_user),
 ):
     """
     Resolve a single passport image file_id.
@@ -498,7 +500,7 @@ async def create_client(
     passport_images: list[UploadFile] = File(default=[]),
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    _admin=Depends(get_admin_user),
+    # _admin=Depends(get_admin_user),
 ):
     """
     Create a new client.
@@ -664,7 +666,7 @@ async def update_client(
     adjustment_type: Optional[str] = Form(None, description="Must be 'bonus', 'penalty', or 'silent'"),
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    _admin=Depends(get_admin_user),
+    # _admin=Depends(get_admin_user),
 ):
     """
     Update an existing client.
@@ -874,7 +876,7 @@ async def delete_client(
     client_id: int,
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    _admin=Depends(get_admin_user),
+    # _admin=Depends(get_admin_user),
 ):
     """
     Delete a client by ID.

@@ -21,7 +21,7 @@ class ImportResponse(BaseModel):
 async def import_uz_database(
     request: Request,
     excel_file: UploadFile = File(...),
-    _admin: Client = Depends(get_admin_user),
+    # _admin: Client = Depends(get_admin_user),
 ) -> ImportResponse:
     """
     Import Uzbekistan (post-flight) database from Excel file.
@@ -70,7 +70,7 @@ async def import_uz_database(
 async def import_china_database(
     request: Request,
     excel_file: UploadFile = File(...),
-    _admin: Client = Depends(get_admin_user),
+    # _admin: Client = Depends(get_admin_user),
 ) -> ImportResponse:
     """
     Import China (pre-flight) database from Excel file.
