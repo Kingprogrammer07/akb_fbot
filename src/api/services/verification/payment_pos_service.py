@@ -212,8 +212,21 @@ class PaymentPOSService:
                 pending_debt_tx = await ClientTransactionDAO.get_by_client_code_flight_row(
                     session, client.active_codes, item.flight, 0
                 )
-                if pending_debt_tx and pending_debt_tx.payment_status == "pending":
-                    duplicate_tx = pending_debt_tx
+                if pending_debt_tx:
+                    if pending_debt_tx.payment_status in ("paid", "partial"):
+                        # Flight-level tx (qator_raqami=0) already settled via bot/approval.
+                        # Creating another POS tx for the same client+flight would be a duplicate.
+                        raise POSPaymentError(
+                            message=(
+                                f"{human_idx}-element: {item.client_code} mijoz uchun "
+                                f"{item.flight} reysi bo'yicha to'lov allaqachon amalga "
+                                f"oshirilgan (tranzaksiya #{pending_debt_tx.id})."
+                            ),
+                            failed_cargo_id=item.cargo_id,
+                            error_code="PAYMENT_EXISTS",
+                        )
+                    elif pending_debt_tx.payment_status == "pending":
+                        duplicate_tx = pending_debt_tx
 
             prevalidated.append(
                 {
