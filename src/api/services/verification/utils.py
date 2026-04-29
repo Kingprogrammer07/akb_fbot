@@ -170,13 +170,22 @@ async def get_unpaid_cargo_items(
 
     # Map cargo IDs (qator_raqami) -> transaction object to access status + remaining_amount
     cargo_tx_map = {}
+    # Flight-level transactions (qator_raqami=0) created by bot/online approval — keyed by
+    # flight name. If a flight has a paid/partial qator_raqami=0 tx, all its cargo items
+    # inherit that status so they are correctly hidden from the POS unpaid list.
+    flight_level_tx_map = {}
     for tx in existing_transactions:
         # If flight filter is applied, only consider transactions for that flight
-        if flight_filter and tx.reys.upper() != flight_filter.upper():
+        if flight_filter and tx.reys and tx.reys.upper() != flight_filter.upper():
             continue
-        # Only consider valid qator_raqami
         if tx.qator_raqami and tx.qator_raqami > 0:
             cargo_tx_map[tx.qator_raqami] = tx
+        elif tx.qator_raqami == 0 and tx.reys:
+            flight_key = tx.reys.upper()
+            existing = flight_level_tx_map.get(flight_key)
+            # paid beats partial — keep the highest-priority status per flight
+            if not existing or tx.payment_status == "paid":
+                flight_level_tx_map[flight_key] = tx
 
     unpaid_items = []
 
@@ -187,6 +196,15 @@ async def get_unpaid_cargo_items(
     for cargo in sent_cargos:
         tx = cargo_tx_map.get(cargo.id)
         status = tx.payment_status if tx else None
+
+        # Fall back to flight-level tx (qator_raqami=0) when no per-cargo tx exists.
+        # This covers bot/online payments that settle the entire flight at once.
+        if status is None and cargo.flight_name:
+            flight_tx = flight_level_tx_map.get(cargo.flight_name.upper())
+            if flight_tx:
+                tx = flight_tx
+                status = flight_tx.payment_status
+
 
         # Fully paid: never include
         if status == "paid":

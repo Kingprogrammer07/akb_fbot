@@ -26,6 +26,7 @@ from src.infrastructure.services import (
     ClientService,
     ClientTransactionService,
     PaymentAllocationService,
+    FlightMaskService,
 )
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.passport_image_resolver import _is_s3_key
@@ -349,6 +350,9 @@ async def _process_approved_payment(
         await state.clear()
         return
 
+    display_worksheet = await FlightMaskService.real_to_mask(session, 1, worksheet)
+    display_worksheet = display_worksheet or worksheet
+
     # --- Redis lookups ---
     wallet_used = await _get_redis_float(redis, f"wallet_used:{client_code}:{worksheet}")
     payment_mode = (
@@ -584,7 +588,7 @@ async def _process_approved_payment(
     if is_partial:
         user_msg = user_text(
             "payment-approved-user-partial",
-            worksheet=worksheet,
+            worksheet=display_worksheet,
             paid=f"{final_paid:.2f}",
             remaining=f"{final_remaining:.2f}",
             total=f"{final_total:.2f}",
@@ -593,7 +597,7 @@ async def _process_approved_payment(
         await _notify_user(bot, telegram_id, user_msg, user_text)
     else:
         user_msg = user_text(
-            "payment-approved-user", worksheet=worksheet, summa=f"{amount:.2f}"
+            "payment-approved-user", worksheet=display_worksheet, summa=f"{amount:.2f}"
         )
         await _notify_user(bot, telegram_id, user_msg, user_text)
         if is_fully_paid and telegram_id:
@@ -610,7 +614,7 @@ async def _process_approved_payment(
                     chat_id=telegram_id,
                     text=user_text(
                         "payment-approved-full-success",
-                        worksheet=worksheet,
+                        worksheet=display_worksheet,
                         paid=f"{final_paid:,.2f}",
                         overpaid=overpaid,
                         overpaid_fmt=f"{overpaid:,.2f}",
@@ -903,8 +907,11 @@ async def reject_payment_callback(
     client = await client_service.get_client_by_code(client_code, session)
     user_text = _user_translator(client)
 
+    display_flight = await FlightMaskService.real_to_mask(session, 1, flight_name)
+    display_flight = display_flight or flight_name
+
     user_msg = (
-        f"⚠️ To'lovingiz (Reys: {flight_name}) rad etildi. Admin bilan bog'laning."
+        f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi. Admin bilan bog'laning."
         if flight_name
         else user_text("payment-rejected-user")
     )
@@ -977,16 +984,19 @@ async def _do_rejection(
     )
     user_text = _user_translator(client)
 
+    display_flight = await FlightMaskService.real_to_mask(session, 1, flight_name)
+    display_flight = display_flight or flight_name
+
     # User notification
     if comment:
         user_msg = (
-            f"⚠️ To'lovingiz (Reys: {flight_name}) rad etildi.\n💬 Sabab: {comment}"
+            f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi.\n💬 Sabab: {comment}"
             if flight_name
             else user_text("payment-rejected-with-comment", comment=comment)
         )
     else:
         user_msg = (
-            f"⚠️ To'lovingiz (Reys: {flight_name}) rad etildi. Admin bilan bog'laning."
+            f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi. Admin bilan bog'laning."
             if flight_name
             else user_text("payment-rejected-user")
         )
@@ -1134,6 +1144,8 @@ async def cash_payment_amount_received(
     data = await state.get_data()
     telegram_id = data["cash_telegram_id"]
     worksheet = data["cash_worksheet"]
+    display_worksheet = await FlightMaskService.real_to_mask(session, 1, worksheet)
+    display_worksheet = display_worksheet or worksheet
     client_code = data["cash_client_code"]
     expected_amount = data.get("cash_expected_amount", 0)
     admin_message_id = data.get("cash_message_id")
@@ -1209,11 +1221,25 @@ async def cash_payment_amount_received(
             )
             or client_code
         )
+        
+        # Fresh duplicate check using all active_codes — state may be stale if another
+        # path (POS, online approval) settled the flight between state save and now.
+        _fresh_existing = await ClientTransactionDAO.get_by_client_code_flight(
+            session, client.active_codes, worksheet
+        )
+        if _fresh_existing and _fresh_existing.payment_status == "paid":
+            await message.answer(
+                "⚠️ Bu reys uchun to'lov allaqachon tasdiqlangan. Takroriy tasdiqlash bekor qilindi."
+            )
+            await state.clear()
+            return
 
         # Re-use a pending-debt row (written by bulk_cargo_sender) if one exists so that
         # the cash approval never creates a second transaction for the same user+flight.
         _pending_debt = None
-        if existing_tx_id:
+        if _fresh_existing and _fresh_existing.payment_status == "pending":
+            _pending_debt = _fresh_existing
+        elif existing_tx_id:
             _looked_up = await ClientTransactionDAO.get_by_id(session, existing_tx_id)
             if _looked_up and _looked_up.payment_status == "pending":
                 _pending_debt = _looked_up
@@ -1309,7 +1335,7 @@ async def cash_payment_amount_received(
                 chat_id=telegram_id,
                 text=user_text(
                     "payment-approved-full-success",
-                    worksheet=worksheet,
+                    worksheet=display_worksheet,
                     paid=f"{final_paid:,.2f}",
                     overpaid=overpaid,
                     overpaid_fmt=f"{overpaid:,.2f}",

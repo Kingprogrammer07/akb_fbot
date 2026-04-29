@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 class FlightItem(BaseModel):
     """Single flight in the paid flights list."""
     flight_name: str
+    display_name: str
 
 
 class PaidFlightsResponse(BaseModel):

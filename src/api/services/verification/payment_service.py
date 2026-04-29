@@ -363,12 +363,16 @@ class PaymentService:
                 wallet_deducted=wallet_deducted if request.use_balance else None,
             )
 
+            from src.infrastructure.services.flight_mask import FlightMaskService
+            masked_flight = await FlightMaskService.real_to_mask(session, 1, request.flight)
+            display_flight = masked_flight or request.flight
+
             return ProcessPaymentResponse(
                 payment=PaymentResult(
                     success=True,
                     transaction_id=new_tx.id,
                     client_code=request.client_code,
-                    flight=request.flight,
+                    flight=display_flight,
                     expected_amount=float(expected_amount),
                     paid_amount=float(request.paid_amount),
                     payment_balance_difference=payment_balance_difference,
@@ -547,12 +551,16 @@ class PaymentService:
                 wallet_deducted=wallet_deducted if request.use_balance else None,
             )
 
+            from src.infrastructure.services.flight_mask import FlightMaskService
+            masked_flight = await FlightMaskService.real_to_mask(session, 1, transaction.reys or "Unknown")
+            display_flight = masked_flight or (transaction.reys or "Unknown")
+
             return ProcessPaymentResponse(
                 payment=PaymentResult(
                     success=True,
                     transaction_id=transaction.id,
                     client_code=transaction.client_code,
-                    flight=transaction.reys or "Unknown",
+                    flight=display_flight,
                     expected_amount=expected_amount,
                     paid_amount=float(request.paid_amount),
                     payment_balance_difference=payment_balance_difference,

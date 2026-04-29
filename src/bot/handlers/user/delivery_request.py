@@ -16,7 +16,7 @@ from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.utils.decorators import handle_errors
 from src.bot.utils.google_sheets_checker import GoogleSheetsChecker
 from src.infrastructure.database.dao import ClientTransactionDAO
-from src.infrastructure.services import ClientService
+from src.infrastructure.services import ClientService, FlightMaskService
 from src.infrastructure.database.dao.delivery_request import DeliveryRequestDAO
 from src.config import config, BASE_DIR
 import math
@@ -24,6 +24,15 @@ import math
 special_regions = ["Qoraqalpog'iston", "Surxondaryo", "Xorazm"]
 
 delivery_request_router = Router(name="delivery_request")
+
+
+async def _mask_flight_names(session: AsyncSession, flights: list[str]) -> list[str]:
+    """Return masked flight names for user display (partner_id=1)."""
+    result = []
+    for f in flights:
+        m = await FlightMaskService.real_to_mask(session, 1, f)
+        result.append(m or f)
+    return result
 
 
 def calculate_price(total_weight: float, region: str) -> int:
@@ -282,41 +291,59 @@ async def profile_confirmation_yes(
     await callback.answer(text=_("please-wait"), show_alert=True)
     # Get flights from Google Sheets
     result = await get_cached_sheets_data(client.client_code, redis)
-
-    if not result["found"] or not result["matches"]:
-        await callback.message.edit_text(_("delivery-no-flights"))
-        await state.clear()
-        await callback.answer()
-        return
+    sheets_matches: list[dict] = (
+        result.get("matches", []) if result.get("found") else []
+    )
 
     # Get delivery type from state
     data = await state.get_data()
     delivery_type = data.get("delivery_type")
 
-    # Filter only PAID flights using client_code + reys + qator_raqami
+    # Filter only PAID flights using active_codes (covers extra_code / legacy_code aliases)
     from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
+    from src.infrastructure.database.dao.expected_cargo import ExpectedFlightCargoDAO
+
+    # Discover flights: Sheets → expected_flight_cargos → paid transactions
+    seen_keys: set[str] = set()
+    candidate_flight_names: list[str] = []
+    for match in sheets_matches:
+        key = match["flight_name"].strip().upper()
+        if key not in seen_keys:
+            seen_keys.add(key)
+            candidate_flight_names.append(match["flight_name"])
+
+    db_flight_names = await ExpectedFlightCargoDAO.get_distinct_flights_for_client(
+        session, client.active_codes
+    )
+    for fn in db_flight_names:
+        key = fn.strip().upper()
+        if key not in seen_keys:
+            seen_keys.add(key)
+            candidate_flight_names.append(fn)
+
+    tx_flight_names = await ClientTransactionDAO.get_distinct_paid_flights_by_client_code(
+        session, client.active_codes
+    )
+    for fn in tx_flight_names:
+        key = fn.strip().upper()
+        if key not in seen_keys:
+            seen_keys.add(key)
+            candidate_flight_names.append(fn)
+
+    from src.infrastructure.services.flight_mask import FlightMaskService
 
     paid_flights = []
-    seen_flights = set()
-    for match in result["matches"]:
-        flight_name = match["flight_name"]
-
-        # Deduplicate - only check each flight once
-        if flight_name in seen_flights:
-            continue
-        seen_flights.add(flight_name)
-
-        # Check if payment exists for this flight
+    for flight_name in candidate_flight_names:
         is_paid = await ClientTransactionDAO.check_payment_exists(
-            session=session, client_code=client.client_code, reys=flight_name
+            session=session, client_code=client.active_codes, reys=flight_name
         )
 
         if is_paid:
-            paid_flights.append(
-                {
-                    "flight_name": flight_name,
-                }
-            )
+            display_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
+            paid_flights.append({
+                "flight_name": flight_name,
+                "display_name": display_name or flight_name,
+            })
 
     # If no paid flights, inform user
     if not paid_flights:
@@ -329,8 +356,9 @@ async def profile_confirmation_yes(
 
     for flight_data in paid_flights:
         flight_name = flight_data["flight_name"]
+        display_name = flight_data["display_name"]
         builder.button(
-            text=f"✈️ {flight_name}", callback_data=f"select_flight:{flight_name}"
+            text=f"✈️ {display_name}", callback_data=f"select_flight:{flight_name}"
         )
 
     # Add "Done" button for all delivery types (multiple selection)
@@ -377,9 +405,10 @@ async def process_flight_selection(
 
     for flight_data in paid_flights:
         fname = flight_data["flight_name"]
+        dname = flight_data.get("display_name") or fname
         checkmark = "✅ " if fname in selected_flights else ""
         builder.button(
-            text=f"{checkmark}✈️ {fname}", callback_data=f"select_flight:{fname}"
+            text=f"{checkmark}✈️ {dname}", callback_data=f"select_flight:{fname}"
         )
 
     builder.button(
@@ -394,7 +423,7 @@ async def process_flight_selection(
 async def _check_rate_limit_bot(session: AsyncSession, client_id: int, requesting_flights: list[str]) -> str | None:
     """Check if the user requested any of these flights within the last hour. Returns error message if so."""
     recent_requests = await DeliveryRequestDAO.get_recent_requests_by_client(session, client_id, hours=1)
-    
+
     for req in recent_requests:
         if not req.flight_names:
             continue
@@ -402,7 +431,8 @@ async def _check_rate_limit_bot(session: AsyncSession, client_id: int, requestin
             req_flights = json.loads(req.flight_names)
             overlap = set(requesting_flights).intersection(set(req_flights))
             if overlap:
-                return f"Siz {', '.join(overlap)} reys(lar)i uchun so'nggi 1 soat ichida zayavka yuborgansiz. Iltimos biroz kuting."
+                masked = await _mask_flight_names(session, list(overlap))
+                return f"Siz {', '.join(masked)} reys(lar)i uchun so'nggi 1 soat ichida zayavka yuborgansiz. Iltimos biroz kuting."
         except json.JSONDecodeError:
             pass
     return None
@@ -444,6 +474,7 @@ async def process_flight_selection_done(
     if delivery_type == "uzpost":
         # Calculate total weight for UZPOST delivery
         total_weight = 0
+        display_flights = await _mask_flight_names(session, selected_flights)
 
         for flight_name in selected_flights:
             # Calculate total weight for each flight
@@ -466,7 +497,7 @@ async def process_flight_selection_done(
                 total_weight=f"{total_weight:.2f}",
                 price_per_kg=f"{price_per_kg:,}",
                 total_amount=f"{total_amount:,}",
-                flights=", ".join(selected_flights),
+                flights=", ".join(display_flights),
             )
             await callback.message.edit_text(warning_text)
             await callback.answer()
@@ -517,7 +548,7 @@ async def process_flight_selection_done(
                     total_weight=f"{total_weight:.2f}",
                     total_amount=f"{total_amount:,}",
                     wallet_used=f"{wallet_used:,.0f}",
-                    flights=", ".join(selected_flights),
+                    flights=", ".join(display_flights),
                 )
             else:
                 payment_text = _(
@@ -529,7 +560,7 @@ async def process_flight_selection_done(
                     final_payable=f"{final_payable_amount:,.0f}",
                     card_number=card.card_number,
                     card_owner=card.full_name,
-                    flights=", ".join(selected_flights),
+                    flights=", ".join(display_flights),
                 )
         else:
             payment_text = _(
@@ -539,7 +570,7 @@ async def process_flight_selection_done(
                 total_amount=f"{total_amount:,}",
                 card_number=card.card_number,
                 card_owner=card.full_name,
-                flights=", ".join(selected_flights),
+                flights=", ".join(display_flights),
             )
 
         # Add wallet toggle button if wallet balance exists
@@ -681,6 +712,8 @@ async def uzpost_toggle_wallet(
         final_payable_amount=final_payable_amount,
     )
 
+    display_flights = await _mask_flight_names(session, selected_flights)
+
     # Get payment card info
     from src.infrastructure.services import PaymentCardService
 
@@ -703,7 +736,7 @@ async def uzpost_toggle_wallet(
                 total_weight=f"{total_weight:.2f}",
                 total_amount=f"{total_amount:,}",
                 wallet_used=f"{wallet_used:,.0f}",
-                flights=", ".join(selected_flights),
+                flights=", ".join(display_flights),
             )
         else:
             payment_text = _(
@@ -715,7 +748,7 @@ async def uzpost_toggle_wallet(
                 final_payable=f"{final_payable_amount:,.0f}",
                 card_number=card.card_number,
                 card_owner=card.full_name,
-                flights=", ".join(selected_flights),
+                flights=", ".join(display_flights),
             )
     else:
         payment_text = _(
@@ -725,7 +758,7 @@ async def uzpost_toggle_wallet(
             total_amount=f"{total_amount:,}",
             card_number=card.card_number,
             card_owner=card.full_name,
-            flights=", ".join(selected_flights),
+            flights=", ".join(display_flights),
         )
 
     # Rebuild keyboard

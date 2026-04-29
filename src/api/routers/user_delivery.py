@@ -43,10 +43,37 @@ from src.config import config, BASE_DIR
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.delivery_request import DeliveryRequestDAO
 from src.infrastructure.database.dao.expected_cargo import ExpectedFlightCargoDAO
+from src.infrastructure.services.flight_mask import FlightMaskService
+from src.infrastructure.services.partner_resolver import (
+    get_resolver,
+    PartnerNotFoundError,
+)
 from src.infrastructure.services.payment_card import PaymentCardService
 
 router = APIRouter(prefix="/user/delivery", tags=["user-delivery"])
 logger = logging.getLogger(__name__)
+
+
+async def _normalize_flight(
+    session: AsyncSession,
+    client,
+    flight_input: str,
+) -> str:
+    """Translate a partner-mask flight identifier to its real DB value."""
+    if not client.active_codes or not flight_input:
+        return flight_input
+    partner = None
+    for code in client.active_codes:
+        try:
+            partner = await get_resolver().resolve_by_client_code(session, code)
+            break
+        except PartnerNotFoundError:
+            continue
+    if not partner:
+        return flight_input
+    return await FlightMaskService.normalize_flight_input(
+        session, partner.id, flight_input
+    )
 
 # ---------------------------------------------------------------------------
 # Constants (mirrored from bot handler)
@@ -239,6 +266,20 @@ async def get_delivery_history(
     requests = await DeliveryRequestDAO.get_by_client_paginated(
         session, client.id, size, offset
     )
+    
+    # Mask flight names in history
+    for req in requests:
+        if req.flight_names:
+            try:
+                flight_names_list = json.loads(req.flight_names)
+                masked_flights = []
+                for f in flight_names_list:
+                    m = await FlightMaskService.real_to_mask(session, 1, f)
+                    masked_flights.append(m or f)
+                req.flight_names = json.dumps(masked_flights, ensure_ascii=False)
+            except json.JSONDecodeError:
+                pass
+
     total_count = await DeliveryRequestDAO.count_by_client(session, client.id)
 
     return DeliveryHistoryResponse(
@@ -267,12 +308,18 @@ async def get_paid_flights(
         sheets_result.get("matches", []) if sheets_result.get("found") else []
     )
 
-    # Also discover flights from the expected_flight_cargos DB table
+    # Discover flights from the expected_flight_cargos DB table
     db_flight_names = await ExpectedFlightCargoDAO.get_distinct_flights_for_client(
         session, client.active_codes
     )
 
-    # Merge: Sheets first (preserve order), then DB-only flights
+    # Also discover flights directly from paid transactions (catches flights missing
+    # from both Google Sheets and expected_flight_cargos)
+    tx_flight_names = await ClientTransactionDAO.get_distinct_paid_flights_by_client_code(
+        session, client.active_codes
+    )
+
+    # Merge: Sheets first (preserve order), then expected_cargo, then paid transactions
     seen_keys: set[str] = set()
     merged_flight_names: list[str] = []
     for match in sheets_matches:
@@ -281,6 +328,11 @@ async def get_paid_flights(
             seen_keys.add(key)
             merged_flight_names.append(match["flight_name"])
     for flight_name in db_flight_names:
+        key = flight_name.strip().upper()
+        if key not in seen_keys:
+            seen_keys.add(key)
+            merged_flight_names.append(flight_name)
+    for flight_name in tx_flight_names:
         key = flight_name.strip().upper()
         if key not in seen_keys:
             seen_keys.add(key)
@@ -295,7 +347,11 @@ async def get_paid_flights(
             reys=flight_name,
         )
         if is_paid:
-            paid_flights.append(FlightItem(flight_name=flight_name))
+            display_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
+            paid_flights.append(FlightItem(
+                flight_name=display_name or flight_name,
+                display_name=display_name or flight_name,
+            ))
 
     return PaidFlightsResponse(flights=paid_flights)
 
@@ -311,8 +367,9 @@ async def calculate_uzpost(
 
     Returns a warning (with no card info) if total weight exceeds 20 kg.
     """
+    real_flight_names = [await _normalize_flight(session, client, f) for f in body.flight_names]
     total_weight = 0.0
-    for flight_name in body.flight_names:
+    for flight_name in real_flight_names:
         weight = await calculate_total_weight(session, flight_name, client.active_codes)
         total_weight += weight
 
@@ -367,9 +424,13 @@ async def _check_rate_limit(session: AsyncSession, client_id: int, requesting_fl
             if overlap := set(requesting_flights).intersection(
                 set(req_flights)
             ):
+                masked = []
+                for f in overlap:
+                    m = await FlightMaskService.real_to_mask(session, 1, f)
+                    masked.append(m or f)
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=f"Siz {', '.join(overlap)} reys(lar)i uchun so'nggi 1 soat ichida zayavka yuborgansiz. Iltimos biroz kuting."
+                    detail=f"Siz {', '.join(masked)} reys(lar)i uchun so'nggi 1 soat ichida zayavka yuborgansiz. Iltimos biroz kuting."
                 )
 
 
@@ -386,7 +447,8 @@ async def submit_standard_delivery(
     and notifies the corresponding admin Telegram channel.
     """
     _validate_profile(client)
-    await _check_rate_limit(session, client.id, body.flight_names)
+    real_flight_names = [await _normalize_flight(session, client, f) for f in body.flight_names]
+    await _check_rate_limit(session, client.id, real_flight_names)
 
     delivery_request = await DeliveryRequestDAO.create(
         session=session,
@@ -394,7 +456,7 @@ async def submit_standard_delivery(
         client_code=client.client_code,
         telegram_id=client.telegram_id,
         delivery_type=body.delivery_type,
-        flight_names=json.dumps(body.flight_names, ensure_ascii=False),
+        flight_names=json.dumps(real_flight_names, ensure_ascii=False),
         full_name=client.full_name,
         phone=client.phone,
         region=client.region,
@@ -406,7 +468,7 @@ async def submit_standard_delivery(
     channel_attr = f"{body.delivery_type.upper()}_DELIVERY_REQUEST_CHANNEL_ID"
     if admin_group_id := getattr(config.telegram, channel_attr, None):
         admin_text = _build_admin_text(
-            delivery_request.id, client, body.delivery_type, body.flight_names
+            delivery_request.id, client, body.delivery_type, real_flight_names
         )
         try:
             await _send_admin_notification(
@@ -453,7 +515,8 @@ async def submit_uzpost_delivery(
             detail="flight_names must be a non-empty JSON array string.",
         ) from e
 
-    await _check_rate_limit(session, client.id, flight_names_list)
+    real_flight_names = [await _normalize_flight(session, client, f) for f in flight_names_list]
+    await _check_rate_limit(session, client.id, real_flight_names)
 
     # Validate wallet usage
     if wallet_used > 0:
@@ -469,7 +532,7 @@ async def submit_uzpost_delivery(
             )
 
     # Store wallet_used in Redis for admin approval flow
-    primary_flight = flight_names_list[0] if flight_names_list else "UZPOST"
+    primary_flight = real_flight_names[0] if real_flight_names else "UZPOST"
     if wallet_used > 0:
         wallet_cache_key = (
             f"wallet_used:{client.telegram_id}:{client.client_code}:{primary_flight}"
@@ -493,7 +556,7 @@ async def submit_uzpost_delivery(
         client_code=client.client_code,
         telegram_id=client.telegram_id,
         delivery_type="uzpost",
-        flight_names=json.dumps(flight_names_list, ensure_ascii=False),
+        flight_names=json.dumps(real_flight_names, ensure_ascii=False),
         full_name=client.full_name,
         phone=client.phone,
         region=client.region,
@@ -504,13 +567,13 @@ async def submit_uzpost_delivery(
 
     # Build admin notification text
     admin_text = _build_admin_text(
-        delivery_request.id, client, "uzpost", flight_names_list
+        delivery_request.id, client, "uzpost", real_flight_names
     )
 
     # Append wallet info
     if wallet_used > 0:
         total_weight = 0.0
-        for fn in flight_names_list:
+        for fn in real_flight_names:
             total_weight += await calculate_total_weight(
                 session, fn, client.client_code
             )

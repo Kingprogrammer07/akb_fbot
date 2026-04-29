@@ -731,9 +731,10 @@ async def pay_partial_handler(
         remaining_amount = total_amount
         deadline_text = (datetime.now(timezone.utc) + timedelta(days=15)).strftime("%Y-%m-%d %H:%M")
 
+    display_flight_local = (await _resolve_mask(session, client, flight_name)) or flight_name
     info_text = _(
         "payment-partial-info",
-        flight=flight_name,
+        flight=display_flight_local,
         client_code=client.primary_code,
         total=total_amount,
         paid=paid_amount,
@@ -1051,9 +1052,10 @@ async def payment_wallet_only_handler(
             text=caption,
             reply_markup=builder.as_markup(),
         )
+        display_flight_local = (await _resolve_mask(session, client, flight_name)) or flight_name
         await callback.message.edit_text(_(
             "payment-wallet-only-submitted",
-            flight=flight_name,
+            flight=display_flight_local,
             amount=f"{total_payment:,.2f}",
         ))
     except Exception as e:

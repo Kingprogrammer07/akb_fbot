@@ -428,8 +428,11 @@ async def get_flight_details(
 
     total_payment = payment_data["total_payment"]
 
+    display_flight_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
+    display_flight_name = display_flight_name or flight_name
+
     return FlightPaymentDetailsResponse(
-        flight_name=flight_name,
+        flight_name=display_flight_name,
         client_code=current_user.primary_code,
         total_payment=total_payment,
         total_weight=payment_data["total_weight"],
@@ -555,9 +558,12 @@ async def submit_wallet_only(
             detail="Failed to send notification to admin group",
         )
 
+    display_flight_name = await FlightMaskService.real_to_mask(session, 1, body.flight_name)
+    display_flight_name = display_flight_name or body.flight_name
+
     return PaymentSubmissionResponse(
         message="Wallet payment submitted for admin approval",
-        flight_name=body.flight_name,
+        flight_name=display_flight_name,
         amount=wallet_used,
         wallet_used=wallet_used,
         payment_mode=body.payment_mode,
@@ -666,9 +672,12 @@ async def submit_cash(
             detail="Failed to send notification to admin group",
         )
 
+    display_flight_name = await FlightMaskService.real_to_mask(session, 1, body.flight_name)
+    display_flight_name = display_flight_name or body.flight_name
+
     return PaymentSubmissionResponse(
         message="Cash payment submitted for admin approval",
-        flight_name=body.flight_name,
+        flight_name=display_flight_name,
         amount=total_payment,
         wallet_used=wallet_used,
         payment_mode="cash",
@@ -906,9 +915,12 @@ async def submit_online(
         cache_amount_key = f"payment_amount:{current_user.primary_code}:{flight_name}"
         await redis.setex(cache_amount_key, 86400, str(paid_amount))
 
+    display_flight_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
+    display_flight_name = display_flight_name or flight_name
+
     return PaymentSubmissionResponse(
         message="Payment receipt submitted for admin approval",
-        flight_name=flight_name,
+        flight_name=display_flight_name,
         amount=paid_amount,
         wallet_used=wallet_used,
         payment_mode=payment_mode,

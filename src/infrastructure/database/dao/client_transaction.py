@@ -426,9 +426,14 @@ class ClientTransactionDAO:
             client_condition = (
                 func.upper(ClientTransaction.client_code) == client_code.upper()
             )
-
+        # Only flight-level rows (qator_raqami=0). Per-cargo rows (qator_raqami>0)
+        # are written by POS and must be queried via get_by_client_code_flight_row.
+        # Mixing them here caused false "duplicate" errors when a client had both a
+        # bot/online flight-level tx and POS per-cargo txs for the same flight.
         query = select(ClientTransaction).where(
-            client_condition, func.upper(ClientTransaction.reys) == reys.upper()
+            client_condition,
+            func.upper(ClientTransaction.reys) == reys.upper(),
+            ClientTransaction.qator_raqami == 0,
         )
         query = apply_public_transaction_filter(query, include_hidden)
 
@@ -531,6 +536,32 @@ class ClientTransactionDAO:
         query = select(ClientTransaction.reys).where(condition)
         query = apply_public_transaction_filter(query, include_hidden)
         query = query.distinct().order_by(ClientTransaction.reys.desc())
+        result = await session.execute(query)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_distinct_paid_flights_by_client_code(
+        session: AsyncSession,
+        client_code: str | list[str],
+    ) -> list[str]:
+        """Return distinct flight names that have at least one fully-paid, not-taken-away transaction."""
+        if isinstance(client_code, list):
+            client_codes_upper = [c.upper() for c in client_code if c]
+            condition = func.upper(ClientTransaction.client_code).in_(client_codes_upper)
+        else:
+            condition = func.upper(ClientTransaction.client_code) == client_code.upper()
+
+        query = (
+            select(ClientTransaction.reys)
+            .where(
+                condition,
+                ClientTransaction.payment_status == "paid",
+                ClientTransaction.remaining_amount <= 0,
+                ClientTransaction.is_taken_away == False,  # noqa: E712
+            )
+            .distinct()
+            .order_by(ClientTransaction.reys.desc())
+        )
         result = await session.execute(query)
         return list(result.scalars().all())
 
