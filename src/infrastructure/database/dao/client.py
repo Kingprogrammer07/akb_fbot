@@ -1,7 +1,10 @@
 from sqlalchemy import and_, select, or_, func, case, exists, text, Integer, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
+import logging
 from src.infrastructure.database.models.client import Client
+
+logger = logging.getLogger(__name__)
 
 
 class ClientDAO:
@@ -111,27 +114,56 @@ class ClientDAO:
         # Masalan: 998901234567 -> 901234567
         core_phone = digits_only[-9:] if len(digits_only) >= 9 else digits_only
 
+        logger.debug(
+            "LOGIN LOOKUP | code_clean=%r | digits_only=%r | core_phone=%r",
+            code_clean, digits_only, core_phone,
+        )
+
         if not core_phone:
+            logger.debug("LOGIN LOOKUP | core_phone empty → return None")
             return None
 
         # 4. Bazada bo'lishi mumkin bo'lgan barcha formatlar ro'yxatini tuzamiz
         possible_formats = {
-            core_phone,  # 901234567 (Lokal)
-            f"998{core_phone}",  # 998901234567 (Kod bilan, plyussiz)
-            f"+998{core_phone}",  # +998901234567 (To'liq xalqaro)
+            core_phone,
+            f"998{core_phone}",
+            f"+998{core_phone}",
         }
 
-        # 5. Bazadan qidirish (Client.phone ushbu variantlardan biriga teng bo'lsa)
+        logger.debug("LOGIN LOOKUP | possible_formats=%s", possible_formats)
+
+        # 5. Code bo'yicha alohida tekshir (phone olmay)
+        code_only_result = await session.execute(
+            select(Client.id, Client.client_code, Client.extra_code, Client.legacy_code, Client.phone)
+            .where(
+                or_(
+                    Client.client_code == code_clean,
+                    Client.extra_code == code_clean,
+                    Client.legacy_code == code_clean,
+                )
+            )
+            .limit(5)
+        )
+        code_rows = code_only_result.fetchall()
+        logger.debug("LOGIN LOOKUP | code-only matches: %s", code_rows)
+
+        # 6. Asosiy qidiruv
         result = await session.execute(
             select(Client)
             .where(
-                or_(Client.client_code == code_clean, Client.extra_code == code_clean),
+                or_(
+                    Client.client_code == code_clean,
+                    Client.extra_code == code_clean,
+                    Client.legacy_code == code_clean,
+                ),
                 Client.phone.in_(possible_formats),
             )
             .limit(1)
         )
 
-        return result.scalar_one_or_none()
+        client = result.scalar_one_or_none()
+        logger.debug("LOGIN LOOKUP | final result: %s", client.id if client else None)
+        return client
 
     @staticmethod
     async def check_unique_fields(

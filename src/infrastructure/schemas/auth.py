@@ -78,6 +78,8 @@ class RegisterResponse(BaseModel):
 class TelegramLoginRequest(BaseModel):
     """Telegram automatic login request schema."""
     init_data: str = Field(..., description="Telegram Web App initData string")
+    client_code: str | None = Field(None, description="Client code for relink fallback")
+    phone_number: str | None = Field(None, description="Phone number for relink fallback")
 
 
 class ValidateInitDataRequest(BaseModel):

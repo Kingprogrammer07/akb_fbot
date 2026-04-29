@@ -245,12 +245,36 @@ async def telegram_login(
         )
 
     client = await ClientDAO.get_by_telegram_id(session, user_id)
-
     if not client:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=_("api-error-client-not-found"),
+        # Fallback: telegram_id not linked (e.g. wiped). Try relink via client_code + phone.
+        if not request.client_code or not request.phone_number:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="telegram_id_not_linked",
+            )
+
+        client = await ClientDAO.get_by_client_code_and_phone(
+            session=session,
+            client_code=request.client_code,
+            phone=request.phone_number,
         )
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=_("api-error-client-not-found"),
+            )
+
+        # Relink telegram_id (safe: initData already cryptographically verified above)
+        old_owner = await ClientDAO.get_by_telegram_id(session, user_id)
+        if old_owner and old_owner.id != client.id:
+            old_owner.telegram_id = None
+            old_owner.is_logged_in = False
+            await session.flush()
+
+        client.telegram_id = user_id
+        client.is_logged_in = True
+        await session.commit()
+        await session.refresh(client)
 
     if not client.client_code:
         raise HTTPException(
