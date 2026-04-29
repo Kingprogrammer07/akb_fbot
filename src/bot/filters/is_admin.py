@@ -4,8 +4,8 @@ from aiogram.filters import BaseFilter
 from aiogram.types import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src import config
 from src.infrastructure.services import ClientService
+from src.bot.utils.admin_access import is_admin_by_telegram_id
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +24,9 @@ class IsAdmin(BaseFilter):
 
         user_id = event.from_user.id
 
-        if user_id in config.telegram.ADMIN_ACCESS_IDs:
-            logger.info(f'User {user_id} granted admin access via config')
-            return True
         try:
-            client_data = await client_service.get_client(user_id, session)
-            if client_data and client_data.role in ['admin', 'super-admin']:
-                logger.info(f'User {user_id} has admin role in database')
+            if await is_admin_by_telegram_id(session, user_id):
+                logger.info(f'User {user_id} has admin access')
                 return True
 
             logger.warning(f'User {user_id} attempted admin access without permission')

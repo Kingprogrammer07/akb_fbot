@@ -437,7 +437,7 @@ async def _process_approved_payment(
             await FlightCargoDAO.get_registered_client_code(
                 session, worksheet, client.active_codes
             )
-            or client.client_code
+            or client.primary_code
         )
 
         if remaining > 0:
@@ -565,7 +565,7 @@ async def _process_approved_payment(
         event_type="payment_approval",
         user_id=telegram_id,
         payload={
-            "client_code": client.client_code,
+            "client_code": client.primary_code,
             "flight_name": worksheet,
             "row_number": 0,
             "payment_provider": payment_provider,
@@ -641,7 +641,7 @@ async def _process_approved_payment(
     channel_text = (
         f"{'✅' if is_fully_paid else '⚠️'} <b>To'lov tasdiqlandi</b>\n"
         f"{'━' * 28}\n"
-        f"👤 <b>Mijoz:</b> <code>{client.client_code}</code>\n"
+        f"👤 <b>Mijoz:</b> <code>{client.primary_code}</code>\n"
         f"✈️ <b>Reys:</b> {worksheet}\n"
         f"{'━' * 28}\n"
         f"💰 <b>Jami narx:</b> {final_total:,.2f} so'm\n"
@@ -1357,7 +1357,7 @@ async def cash_payment_amount_received(
     channel_text = (
         f"{'✅' if is_fully_paid else '⚠️'} <b>To'lov tasdiqlandi</b>\n"
         f"{'━' * 28}\n"
-        f"👤 <b>Mijoz:</b> <code>{client.client_code}</code>\n"
+        f"👤 <b>Mijoz:</b> <code>{client.primary_code}</code>\n"
         f"✈️ <b>Reys:</b> {worksheet}\n"
         f"{'━' * 28}\n"
         f"💰 <b>Jami narx:</b> {final_total:,.2f} so'm\n"

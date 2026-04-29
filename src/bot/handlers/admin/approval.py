@@ -175,7 +175,7 @@ async def approve_client(
 
     await client_service.update_client(
         telegram_id=telegram_id,
-        data={"client_code": client_code, "is_logged_in": True},
+        data={"extra_code": client_code, "is_logged_in": True},
         session=session,
     )
     await session.commit()

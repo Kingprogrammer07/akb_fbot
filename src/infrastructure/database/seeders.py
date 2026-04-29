@@ -74,6 +74,9 @@ _PERMISSION_DEFINITIONS: dict[str, list[str]] = {
     #   (list by year, create, update, delete).  A single broad permission keeps
     #   role assignment simple — only ops managers need to touch this data.
     "flight_schedule":  ["manage"],
+    # partners:manage -> partner settings, payment methods, foto_hisobot,
+    # and flight aliases.
+    "partners":        ["manage"],
 }
 
 
@@ -143,6 +146,7 @@ _ROLE_DEFINITIONS: dict[str, dict] = {
             "flights:read",
             "flights:create",
             "flights:update",
+            "partners:manage",
         ],
     },
     "accountant": {

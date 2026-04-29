@@ -41,7 +41,7 @@ class ClientService:
             "telegram_id": telegram_id,
             "full_name": full_name,
             "referrer_telegram_id": referrer_telegram_id,
-            "client_code": client_code,
+            "extra_code": client_code,
             "region": region,
             "district": district,
         }

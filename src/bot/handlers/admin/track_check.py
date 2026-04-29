@@ -11,6 +11,7 @@ from src.infrastructure.services.cargo_item import CargoItemService
 from src.infrastructure.services.client import ClientService
 from src.bot.utils.decorators import handle_errors
 from src.bot.keyboards.reply_kb.general_keyb import cancel_kyb
+from src.bot.utils.admin_access import is_super_admin_by_telegram_id
 
 track_check_router = Router()
 
@@ -47,8 +48,7 @@ async def process_track_code(
     if message.text == _("btn-cancel"):
         await state.clear()
         from src.bot.keyboards.reply_kb.admin_menu import get_admin_main_menu
-        client = await client_service.get_client(message.from_user.id, session)
-        is_super = bool(client and client.role == "super-admin")
+        is_super = await is_super_admin_by_telegram_id(session, message.from_user.id)
         await message.answer(
             _("admin-track-check-cancelled"),
             reply_markup=get_admin_main_menu(_, is_super_admin=is_super)

@@ -276,7 +276,7 @@ async def telegram_login(
         await session.commit()
         await session.refresh(client)
 
-    if not client.client_code:
+    if not client.primary_code:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_("api-error-registration-pending"),
@@ -295,7 +295,7 @@ async def telegram_login(
     )
 
     return LoginResponse(
-        client_code=client.client_code,
+        client_code=client.primary_code,
         full_name=client.full_name,
         phone=client.phone,
         telegram_id=client.telegram_id,
@@ -350,7 +350,7 @@ async def login(
             detail=_("api-error-client-not-found"),
         )
 
-    if not client.client_code:
+    if not client.primary_code:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_("api-error-registration-pending"),
@@ -472,7 +472,7 @@ async def login(
 
     # ── 7. Return response ────────────────────────────────────────────────────
     return LoginResponse(
-        client_code=client.client_code,
+        client_code=client.primary_code,
         full_name=client.full_name,
         phone=client.phone,
         telegram_id=request.telegram_id or client.telegram_id,
@@ -782,7 +782,7 @@ async def get_me(
 
     return AuthMeResponse(
         id=current_client.id,
-        client_code=current_client.client_code,
+        client_code=current_client.primary_code,
         full_name=current_client.full_name,
         phone=current_client.phone,
         telegram_id=current_client.telegram_id,

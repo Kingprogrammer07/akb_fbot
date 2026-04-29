@@ -9,6 +9,7 @@ from src.bot.filters.is_private_chat import IsPrivate
 from src.bot.filters.is_admin import IsAdmin
 from src.bot.utils.decorators import handle_errors
 from src.bot.utils.responses import reply_with_admin_panel
+from src.bot.utils.admin_access import is_super_admin_by_telegram_id
 from src.infrastructure.services.client import ClientService
 
 admin_start_router = Router(name="admin_start")
@@ -43,15 +44,7 @@ async def admin_start_handler(
         await session.commit()
     
     # Send welcome message
-    from src.config import config
-    is_super = bool(
-        (client and client.role == "super-admin")
-        or (
-            message.from_user.id
-            and config.telegram.ADMIN_ACCESS_IDs
-            and message.from_user.id in config.telegram.ADMIN_ACCESS_IDs
-        )
-    )
+    is_super = await is_super_admin_by_telegram_id(session, message.from_user.id)
     await reply_with_admin_panel(message, _("admin-welcome"), translator=_, is_super_admin=is_super)
 
 
@@ -70,17 +63,6 @@ async def admin_back_handler(
 ):
     """Handle back button - return to main menu."""
     await state.clear()
-    client = await client_service.get_client(message.from_user.id, session)
-    from src.config import config
-    is_super = bool(
-        (client and client.role == "super-admin")
-        or (
-            message.from_user.id
-            and config.telegram.ADMIN_ACCESS_IDs
-            and message.from_user.id in config.telegram.ADMIN_ACCESS_IDs
-        )
-    )
+    is_super = await is_super_admin_by_telegram_id(session, message.from_user.id)
     await reply_with_admin_panel(message, _("admin-back-to-menu"), translator=_, is_super_admin=is_super)
-
-
 

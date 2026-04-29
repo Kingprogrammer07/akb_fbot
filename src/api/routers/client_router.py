@@ -620,7 +620,8 @@ async def create_client(
         "region": region,
         "district": district,
         "address": address,
-        "client_code": final_client_code,
+        "extra_code": final_client_code,
+        "client_code": None,
         # Referrer ma'lumotlari
         "referrer_telegram_id": final_referrer_telegram_id,
         "referrer_client_code": final_referrer_client_code,

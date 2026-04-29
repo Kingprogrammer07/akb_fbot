@@ -1,4 +1,5 @@
 """Admin settings handler."""
+from dataclasses import dataclass
 import logging
 import subprocess
 from aiogram import Bot, F, Router
@@ -9,6 +10,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src import config
 from src.bot.filters import IsPrivate, IsSuperAdmin
 from src.bot.states.admin_settings import AdminSettingsStates
 from src.bot.utils.decorators import handle_errors
@@ -16,9 +18,11 @@ from src.bot.utils.currency_converter import currency_converter
 from src.bot.utils.db_backup import create_database_backup, cleanup_backup_file
 from src.bot.utils.responses import reply_with_admin_panel
 from src.bot.keyboards.reply_kb.admin_menu import get_admin_main_menu
+from src.infrastructure.database.dao.admin_account import AdminAccountDAO
 from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.database.dao.payment_card import PaymentCardDAO
 from src.infrastructure.database.dao.static_data import StaticDataDAO
+from src.infrastructure.database.models.client import Client
 from src.infrastructure.database.models.payment_card import PaymentCard
 from src.infrastructure.services.client import ClientService
 from src.infrastructure.services.payment_card import PaymentCardService
@@ -30,6 +34,20 @@ settings_router = Router(name="admin_settings")
 # Constants
 CARDS_PER_PAGE = 5
 ADMINS_PER_PAGE = 5
+
+
+@dataclass(frozen=True)
+class AdminListItem:
+    id: int | None
+    full_name: str
+    client_code: str | None
+    telegram_id: int | None
+    role_name: str
+    is_root_config: bool = False
+
+    @property
+    def can_remove(self) -> bool:
+        return bool(self.id and not self.is_root_config)
 
 
 def mask_card_number(card_number: str) -> str:
@@ -226,7 +244,7 @@ def get_remove_admin_keyboard(
     total_pages: int,
     translator: callable
 ) -> InlineKeyboardBuilder:
-    """Get admin removal list keyboard with pagination."""
+    """Get admin removal list keyboard with root config admins protected."""
     builder = InlineKeyboardBuilder()
 
     start_idx = page * ADMINS_PER_PAGE
@@ -235,14 +253,19 @@ def get_remove_admin_keyboard(
 
     for admin in page_admins:
         code = admin.client_code or "N/A"
+        marker = " ROOT" if admin.is_root_config else ""
+        callback_data = (
+            f"settings:fire_admin:{admin.id}"
+            if admin.can_remove
+            else "settings:root_admin"
+        )
         builder.row(
             InlineKeyboardButton(
-                text=f"{admin.full_name} - {code} ❌",
-                callback_data=f"settings:fire_admin:{admin.id}"
+                text=f"{admin.full_name} - {code}{marker} ❌",
+                callback_data=callback_data
             )
         )
 
-    # Pagination controls
     nav_buttons = []
     if page > 0:
         nav_buttons.append(
@@ -269,6 +292,96 @@ def get_remove_admin_keyboard(
     )
 
     return builder
+
+
+async def _load_admin_list(session: AsyncSession) -> list[AdminListItem]:
+    """Return admins with config root admins first, then RBAC and legacy admins."""
+    items: list[AdminListItem] = []
+    seen_client_ids: set[int] = set()
+    seen_telegram_ids: set[int] = set()
+
+    config_admin_ids = sorted(config.telegram.ADMIN_ACCESS_IDs or set())
+    if config_admin_ids:
+        result = await session.execute(
+            select(Client).where(Client.telegram_id.in_(config_admin_ids))
+        )
+        clients_by_tg = {client.telegram_id: client for client in result.scalars().all()}
+
+        for telegram_id in config_admin_ids:
+            client = clients_by_tg.get(telegram_id)
+            if client:
+                seen_client_ids.add(client.id)
+                seen_telegram_ids.add(telegram_id)
+                items.append(
+                    AdminListItem(
+                        id=client.id,
+                        full_name=client.full_name,
+                        client_code=client.primary_code,
+                        telegram_id=telegram_id,
+                        role_name="root-config",
+                        is_root_config=True,
+                    )
+                )
+            else:
+                seen_telegram_ids.add(telegram_id)
+                items.append(
+                    AdminListItem(
+                        id=None,
+                        full_name=f"Config admin {telegram_id}",
+                        client_code=f"TG:{telegram_id}",
+                        telegram_id=telegram_id,
+                        role_name="root-config",
+                        is_root_config=True,
+                    )
+                )
+
+    accounts = await AdminAccountDAO.get_all_admins(
+        session,
+        skip=0,
+        limit=10000,
+        is_active=True,
+    )
+    for account in accounts:
+        client = account.client
+        if not client or client.id in seen_client_ids:
+            continue
+        seen_client_ids.add(client.id)
+        if client.telegram_id:
+            seen_telegram_ids.add(client.telegram_id)
+        items.append(
+            AdminListItem(
+                id=client.id,
+                full_name=client.full_name,
+                client_code=client.primary_code,
+                telegram_id=client.telegram_id,
+                role_name=account.role_name,
+            )
+        )
+
+    result = await session.execute(
+        select(Client)
+        .where(Client.role.in_(["admin", "super-admin"]))
+        .order_by(Client.full_name)
+    )
+    for client in result.scalars().all():
+        if client.id in seen_client_ids:
+            continue
+        if client.telegram_id and client.telegram_id in seen_telegram_ids:
+            continue
+        seen_client_ids.add(client.id)
+        if client.telegram_id:
+            seen_telegram_ids.add(client.telegram_id)
+        items.append(
+            AdminListItem(
+                id=client.id,
+                full_name=client.full_name,
+                client_code=client.primary_code,
+                telegram_id=client.telegram_id,
+                role_name=client.role or "admin",
+            )
+        )
+
+    return items
 
 
 @settings_router.message(
@@ -1060,9 +1173,6 @@ async def remove_admin_list_handler(
     _: callable
 ) -> None:
     """Show paginated list of admins for removal."""
-    from sqlalchemy import select
-    from src.infrastructure.database.models.client import Client
-
     # Get page number
     page = 0
     if callback.data.startswith("settings:remove_admin_page:"):
@@ -1072,11 +1182,7 @@ async def remove_admin_list_handler(
             await session.rollback()
             page = 0
 
-    # Query all admins
-    result = await session.execute(
-        select(Client).where(Client.role.in_(['admin', 'super-admin'])).order_by(Client.full_name)
-    )
-    admins = list(result.scalars().all())
+    admins = await _load_admin_list(session)
 
     if not admins:
         keyboard = get_back_to_settings_keyboard(_)
@@ -1115,6 +1221,19 @@ async def remove_admin_list_handler(
 
 @settings_router.callback_query(
     IsSuperAdmin(),
+    F.data == "settings:root_admin"
+)
+@handle_errors
+async def root_admin_protected_handler(
+    callback: CallbackQuery,
+    _: callable
+) -> None:
+    """Config root admins are shown first but cannot be removed from the bot."""
+    await callback.answer(_("admin-settings-remove-admin-self"), show_alert=True)
+
+
+@settings_router.callback_query(
+    IsSuperAdmin(),
     F.data.startswith("settings:fire_admin:")
 )
 @handle_errors
@@ -1124,9 +1243,6 @@ async def fire_admin_handler(
     _: callable
 ) -> None:
     """Remove admin privileges from a client."""
-    from sqlalchemy import select
-    from src.infrastructure.database.models.client import Client
-
     try:
         client_id = int(callback.data.split(":")[-1])
     except ValueError:
@@ -1144,6 +1260,13 @@ async def fire_admin_handler(
         await callback.answer(_("error-user-not-found"), show_alert=True)
         return
 
+    if target.telegram_id in (config.telegram.ADMIN_ACCESS_IDs or set()):
+        await callback.answer(
+            _("admin-settings-remove-admin-self"),
+            show_alert=True
+        )
+        return
+
     # Prevent self-removal
     if target.telegram_id == callback.from_user.id:
         await callback.answer(
@@ -1152,7 +1275,11 @@ async def fire_admin_handler(
         )
         return
 
-    # Demote
+    account = await AdminAccountDAO.get_by_client_id(session, target.id)
+    if account:
+        account.is_active = False
+
+    # Demote legacy bot role too.
     target.role = 'user'
     await session.commit()
 
@@ -1161,11 +1288,7 @@ async def fire_admin_handler(
         show_alert=True
     )
 
-    # Refresh the list
-    result = await session.execute(
-        select(Client).where(Client.role.in_(['admin', 'super-admin'])).order_by(Client.full_name)
-    )
-    admins = list(result.scalars().all())
+    admins = await _load_admin_list(session)
 
     if not admins:
         keyboard = get_back_to_settings_keyboard(_)
