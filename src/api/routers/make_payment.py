@@ -769,11 +769,7 @@ async def submit_online(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Minimum partial payment is 1,000 UZS",
             )
-        if paid_amount > remaining_for_partial:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"paid_amount ({paid_amount:,.2f}) exceeds remaining ({remaining_for_partial:,.2f})",
-            )
+
 
     # Validate wallet usage
     if wallet_used > 0:
@@ -840,7 +836,7 @@ async def submit_online(
         total_amount_for_msg = total_payment
         partial_paid_amount = paid_amount
         # FIXED: Subtract paid_amount from the current remaining balance, not the original total
-        partial_remaining = remaining_for_partial - paid_amount
+        partial_remaining = max(0.0, remaining_for_partial - paid_amount)
 
     final_payable = paid_amount - wallet_used if wallet_used > 0 else None
 
