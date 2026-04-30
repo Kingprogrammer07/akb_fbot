@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import math
 from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -144,11 +145,11 @@ class PaymentPOSService:
             human_idx = idx + 1  # 1-based for user-facing error messages
 
             client = await client_service.get_client_by_code(item.client_code, session)
-            if not client:
-                raise POSPaymentError(
-                    message=f"{human_idx}-element: '{item.client_code}' kodli mijoz topilmadi.",
-                    failed_cargo_id=item.cargo_id,
-                )
+            active_codes = (
+                client.active_codes
+                if client and client.active_codes
+                else [item.client_code]
+            )
 
             # The cashier may have typed either the real flight code or the
             # partner-specific mask shown to the client.  Translate the input
@@ -194,7 +195,7 @@ class PaymentPOSService:
                 )
 
             duplicate_tx = await ClientTransactionDAO.get_by_client_code_flight_row(
-                session, client.active_codes, item.flight, item.cargo_id
+                session, active_codes, item.flight, item.cargo_id
             )
             if duplicate_tx and duplicate_tx.payment_status == "paid":
                 raise POSPaymentError(
@@ -210,7 +211,7 @@ class PaymentPOSService:
             # that row avoids creating a second transaction for the same user+flight.
             if not duplicate_tx:
                 pending_debt_tx = await ClientTransactionDAO.get_by_client_code_flight_row(
-                    session, client.active_codes, item.flight, 0
+                    session, active_codes, item.flight, 0
                 )
                 if pending_debt_tx:
                     if pending_debt_tx.payment_status in ("paid", "partial"):
@@ -232,6 +233,7 @@ class PaymentPOSService:
                 {
                     "item": item,
                     "client": client,
+                    "active_codes": active_codes,
                     "cargo_data": cargo_data,
                     "existing_tx": duplicate_tx,
                 }
@@ -250,6 +252,7 @@ class PaymentPOSService:
             for entry in prevalidated:
                 item: BulkPaymentItem = entry["item"]
                 client = entry["client"]
+                active_codes: list[str] = entry["active_codes"]
                 cargo_data: dict = entry["cargo_data"]
 
                 (
@@ -271,7 +274,7 @@ class PaymentPOSService:
                     session=session,
                     expected_amount=cargo_data["total_amount"],
                     weight=cargo_data["weight"],
-                    telegram_id=client.telegram_id or 0,
+                    telegram_id=(client.telegram_id if client else 0) or 0,
                     use_balance=item.use_balance,
                     allow_overpayment=True,
                     existing_tx=entry["existing_tx"],
@@ -280,7 +283,7 @@ class PaymentPOSService:
 
                 wallet_deducted_map[item.cargo_id] = wallet_deducted or 0.0
                 created_transaction_ids.append(new_tx.id)
-                active_codes_by_transaction[new_tx.id] = client.active_codes or [
+                active_codes_by_transaction[new_tx.id] = active_codes or [
                     new_tx.client_code
                 ]
 
@@ -339,7 +342,12 @@ class PaymentPOSService:
         # ------------------------------------------------------------------
         notification_coroutines = [
             PaymentService._send_payment_notifications(
-                client=entry["client"],
+                client=entry["client"] or SimpleNamespace(
+                    telegram_id=0,
+                    language_code="uz",
+                    primary_code=entry["cargo_data"]["client_id"],
+                    phone=None,
+                ),
                 transaction_id=result.transaction_id,
                 flight=result.flight,
                 amount=result.paid_amount,
@@ -564,20 +572,14 @@ class PaymentPOSService:
 
         client_service = ClientService()
         client = await client_service.get_client_by_code(body.client_code, session)
-        if not client:
-            raise POSPaymentError(
-                message=f"'{body.client_code}' kodli mijoz topilmadi.",
-            )
-
-        # primary_code is the canonical identifier — resolves extra_code → client_code
-        # → legacy_code → str(telegram_id). Must be used for all downstream writes
-        # so the transaction is stored under the same key every other part of the
-        # system uses for this client.
-        canonical_code = client.primary_code
+        # Use the canonical Client code when the client exists. Partner cargo
+        # codes may not have a clients row, so keep the raw cashier input as
+        # the ledger key in that case.
+        canonical_code = client.primary_code if client else body.client_code.upper()
 
         adj_tx = await ClientTransactionDAO.create_system_adjustment(
             session=session,
-            telegram_id=client.telegram_id or 0,
+            telegram_id=(client.telegram_id if client else 0) or 0,
             client_code=canonical_code,
             amount=body.amount,
             reason=body.reason,

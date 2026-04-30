@@ -3,9 +3,9 @@
 
 Field mapping (per project decisions, 2026-04-28):
 
-* ``client_code``     ← sqlite ``new_client_code`` (new short format
-                        ``A02-14`` / ``ABU14``). When ``new_client_code``
-                        is empty, falls back to sqlite ``client_code``.
+* ``client_code``     ← sqlite ``new_client_code`` as-is. When
+                        ``new_client_code`` is empty, falls back to sqlite
+                        ``client_code``.
 * ``legacy_code``     ← sqlite ``client_code`` raw value (historical
                         ``AKB570`` / ``AKB123`` identifier).
 * ``extra_code``      ← always ``NULL``.
@@ -58,7 +58,6 @@ from sqlalchemy.orm import sessionmaker
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
 
-from scripts.convert_extra_codes_to_short import _convert as _shorten_legacy_code
 from src.api.utils.constants import (
     LEGACY_DISTRICT_KEY_TO_CODE,
     LEGACY_REGION_KEY_TO_CODE,
@@ -168,16 +167,8 @@ def _row_to_data(row: sqlite3.Row) -> dict[str, Any] | None:
     legacy_value = _normalize_code(row["client_code"])
     new_value = _normalize_code(row["new_client_code"])
 
-    # If new_client_code is still in old long shape, convert it to short format
-    # Example:
-    #   AKB01-2/14 -> A02-14
-    #   AKB80-3/14 -> ABU14 (depends on your converter mapping)
-    if new_value:
-        shortened = _shorten_legacy_code(new_value)
-        if shortened:
-            new_value = shortened
-
-    # Canonical client_code prefers new short code, falls back to old client_code
+    # Canonical client_code prefers sqlite new_client_code exactly as stored,
+    # then falls back to the old client_code value.
     primary_code = new_value or legacy_value
 
     if telegram_id is None and not primary_code:

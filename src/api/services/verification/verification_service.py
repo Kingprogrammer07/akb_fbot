@@ -22,6 +22,7 @@ from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
 from src.infrastructure.services.client import ClientService
+from src.infrastructure.tools.datetime_utils import get_current_time
 
 
 class VerificationService:
@@ -83,7 +84,52 @@ class VerificationService:
             client_service = ClientService()
             client = await client_service.get_client_by_code(query.upper(), session)
         if not client:
-            return None
+            if is_phone_query:
+                return None
+
+            canonical_code = query.upper()
+            active_codes = [canonical_code]
+            total_payments = await ClientTransactionDAO.count_by_client_code(
+                session,
+                active_codes,
+            )
+            taken_away_count = await ClientTransactionDAO.count_taken_away_by_client_code(
+                session,
+                active_codes,
+            )
+            db_flights = await ClientTransactionDAO.get_unique_flights_by_client_code(
+                session,
+                active_codes,
+            )
+            cargo_flights = await FlightCargoDAO.get_unique_flights_by_client_sent(
+                session,
+                active_codes,
+            )
+            sheets_flights = await VerificationService._get_sheets_flights(canonical_code)
+            all_flights = list(set(db_flights + cargo_flights + sheets_flights))
+            all_flights.sort(reverse=True)
+
+            if not total_payments and not all_flights:
+                return None
+
+            client_balance, client_balance_status = (
+                await VerificationService.calculate_client_balance(active_codes, session)
+            )
+            return ClientSearchResult(
+                id=0,
+                client_code=canonical_code,
+                full_name=canonical_code,
+                telegram_id=None,
+                phone=None,
+                is_admin=False,
+                stats=ClientStats(
+                    total_payments=total_payments,
+                    cargo_taken=taken_away_count,
+                ),
+                flights=all_flights,
+                client_balance=client_balance,
+                client_balance_status=client_balance_status,
+            )
 
         canonical_code = client.primary_code
         active_codes = client.active_codes
@@ -144,7 +190,61 @@ class VerificationService:
         client_service = ClientService()
         client = await client_service.get_client_by_code(client_code, session)
         if not client:
-            return None
+            canonical_code = client_code.upper()
+            active_codes = [canonical_code]
+            transaction_count = await ClientTransactionDAO.count_by_client_code(
+                session,
+                active_codes,
+            )
+            latest_tx = await ClientTransactionDAO.get_latest_by_client_code(
+                session,
+                active_codes,
+            )
+            cargo_flights = await FlightCargoDAO.get_unique_flights_by_client_sent(
+                session,
+                active_codes,
+            )
+            sheets_flights = await VerificationService._get_sheets_flights(canonical_code)
+            if not transaction_count and not cargo_flights and not sheets_flights:
+                return None
+
+            latest_transaction = None
+            if latest_tx:
+                status_context = await TransactionViewService.get_status_context(
+                    session,
+                    latest_tx,
+                    active_codes,
+                )
+                latest_transaction = TransactionViewService.build_transaction_summary(
+                    latest_tx,
+                    status_context,
+                )
+
+            client_balance, client_balance_status = (
+                await VerificationService.calculate_client_balance(active_codes, session)
+            )
+            return ClientFullInfo(
+                id=0,
+                client_code=canonical_code,
+                full_name=canonical_code,
+                telegram_id=None,
+                phone=None,
+                passport_series=None,
+                pinfl=None,
+                date_of_birth=None,
+                region=None,
+                district=None,
+                address=None,
+                is_admin=False,
+                referral_count=0,
+                extra_passports_count=0,
+                passport_image_file_ids=[],
+                created_at=latest_tx.created_at if latest_tx else get_current_time(),
+                transaction_count=transaction_count,
+                latest_transaction=latest_transaction,
+                client_balance=client_balance,
+                client_balance_status=client_balance_status,
+            )
 
         canonical_code = client.primary_code
         active_codes = client.active_codes
