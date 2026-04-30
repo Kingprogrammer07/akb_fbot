@@ -145,6 +145,7 @@ class ClientPaymentEventDAO:
         offset: int,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        payment_provider: str | None = None,
     ) -> list[dict]:
         """
         Return paginated payment events, optionally filtered to one cashier.
@@ -164,6 +165,7 @@ class ClientPaymentEventDAO:
             offset:    Row offset for pagination.
             date_from: Inclusive lower bound on created_at (UTC-aware).
             date_to:   Inclusive upper bound on created_at (UTC-aware).
+            payment_provider: Optional provider filter.
 
         Returns:
             List of dicts with keys:
@@ -201,6 +203,8 @@ class ClientPaymentEventDAO:
             query = query.where(ClientPaymentEvent.created_at >= date_from)
         if date_to is not None:
             query = query.where(ClientPaymentEvent.created_at <= date_to)
+        if payment_provider is not None:
+            query = query.where(ClientPaymentEvent.payment_provider == payment_provider)
 
         query = query.order_by(ClientPaymentEvent.created_at.desc()).limit(limit).offset(offset)
 
@@ -226,6 +230,7 @@ class ClientPaymentEventDAO:
         admin_id: int | None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        payment_provider: str | None = None,
     ) -> int:
         """
         Count payment events, optionally filtered to one cashier.
@@ -246,6 +251,8 @@ class ClientPaymentEventDAO:
             query = query.where(ClientPaymentEvent.created_at >= date_from)
         if date_to is not None:
             query = query.where(ClientPaymentEvent.created_at <= date_to)
+        if payment_provider is not None:
+            query = query.where(ClientPaymentEvent.payment_provider == payment_provider)
 
         result = await session.execute(query)
         return result.scalar_one()
@@ -280,4 +287,50 @@ class ClientPaymentEventDAO:
         result = await session.execute(query)
         total = result.scalar_one_or_none()
         return float(total) if total else 0.0
+
+    @staticmethod
+    async def sum_by_provider_for_admin_id(
+        session: AsyncSession,
+        admin_id: int | None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> dict[str, float]:
+        """
+        Return provider totals for the selected cashier/date filters.
+
+        The result intentionally does not accept a provider filter: it powers the
+        POS dashboard cards, where cash/card/click/payme totals should remain
+        visible side by side while the log list can be filtered independently.
+        """
+        query = select(
+            ClientPaymentEvent.payment_provider,
+            func.sum(ClientPaymentEvent.amount).label("total"),
+        )
+
+        if admin_id is not None:
+            query = query.where(ClientPaymentEvent.approved_by_admin_id == admin_id)
+
+        if date_from is not None:
+            query = query.where(ClientPaymentEvent.created_at >= date_from)
+        if date_to is not None:
+            query = query.where(ClientPaymentEvent.created_at <= date_to)
+
+        query = query.group_by(ClientPaymentEvent.payment_provider)
+        rows = (await session.execute(query)).all()
+
+        totals: dict[str, float] = {
+            "cash": 0.0,
+            "card": 0.0,
+            "click": 0.0,
+            "payme": 0.0,
+            "wallet": 0.0,
+        }
+        for row in rows:
+            provider = row.payment_provider or "cash"
+            totals[provider] = float(row.total or 0.0)
+
+        totals["total"] = (
+            totals["cash"] + totals["card"] + totals["click"] + totals["payme"]
+        )
+        return totals
 

@@ -35,6 +35,7 @@ from src.infrastructure.schemas.pos_schemas import (
     AdjustBalanceResponse,
     BulkPaymentRequest,
     BulkPaymentResponse,
+    CashierLogProvider,
     CashierLogResponse,
     TransactionStatusUpdateResponse,
     UpdateDeliveryRequestTypeRequest,
@@ -135,6 +136,10 @@ async def get_cashier_log(
     date_to: datetime | None = Query(
         None,
         description="Inclusive upper bound filter on created_at (ISO 8601 UTC)",
+    ),
+    payment_provider: CashierLogProvider | None = Query(
+        None,
+        description="Optional provider filter for log rows: cash, card, click, payme, or wallet",
     ),
     admin: AdminJWTPayload = Depends(require_permission("pos", "read")),
     session: AsyncSession = Depends(get_db),
@@ -356,6 +361,10 @@ async def get_all_cashier_logs(
         None,
         description="Inclusive upper bound filter on created_at (ISO 8601 UTC)",
     ),
+    payment_provider: CashierLogProvider | None = Query(
+        None,
+        description="Optional provider filter for log rows: cash, card, click, payme, or wallet",
+    ),
     admin: AdminJWTPayload = Depends(require_permission("audit_logs", "read")),
     session: AsyncSession = Depends(get_db),
 ) -> CashierLogResponse:
@@ -386,4 +395,5 @@ async def get_all_cashier_logs(
         cashier_id=cashier_id,
         date_from=date_from,
         date_to=date_to,
+        payment_provider=payment_provider,
     )

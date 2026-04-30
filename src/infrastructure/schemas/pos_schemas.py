@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 PaymentProvider = Literal["cash", "click", "payme", "card"]
+CashierLogProvider = Literal["cash", "click", "payme", "card", "wallet"]
 DeliveryRequestType = Literal["uzpost", "bts", "akb", "yandex"]
 DeliveryProofMethod = Literal["uzpost", "bts", "akb", "yandex", "self_pickup"]
 
@@ -134,6 +135,21 @@ class CashierLogItem(BaseModel):
     cashier_id: int | None = None
     created_at: datetime
 
+class CashierLogSummary(BaseModel):
+    """Payment totals for the currently selected cashier/date filters."""
+
+    cash: float = 0.0
+    card: float = 0.0
+    click: float = 0.0
+    payme: float = 0.0
+    wallet: float = Field(
+        0.0,
+        description="Signed balance adjustments; not a real cash inflow.",
+    )
+    total: float = Field(
+        0.0,
+        description="Cash/card/click/payme total. Excludes wallet adjustments.",
+    )
 
 class CashierLogResponse(BaseModel):
     """Paginated cashier log with daily totals."""
@@ -144,6 +160,10 @@ class CashierLogResponse(BaseModel):
     size: int
     total_pages: int
     today_total: float = Field(..., description="Sum of amounts processed today (UZS)")
+    summary: CashierLogSummary = Field(
+        default_factory=CashierLogSummary,
+        description="Provider totals for the active cashier/date filters.",
+    )
 
 
 # ---------------------------------------------------------------------------

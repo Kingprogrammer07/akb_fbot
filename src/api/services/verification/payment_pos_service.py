@@ -35,6 +35,7 @@ from src.infrastructure.schemas.pos_schemas import (
     BulkPaymentResponse,
     CashierLogItem,
     CashierLogResponse,
+    CashierLogSummary,
     TransactionStatusUpdateResponse,
     UpdateDeliveryRequestTypeRequest,
     UpdateProofDeliveryMethodRequest,
@@ -396,6 +397,7 @@ class PaymentPOSService:
         session: AsyncSession,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        payment_provider: str | None = None,
     ) -> CashierLogResponse:
         """
         Return a paginated audit log of all payments processed by this cashier.
@@ -411,14 +413,15 @@ class PaymentPOSService:
             session:   Async DB session.
             date_from: Optional inclusive lower bound filter (UTC-aware datetime).
             date_to:   Optional inclusive upper bound filter (UTC-aware datetime).
-
+            payment_provider: Optional provider filter for the log rows.
+            
         Returns:
             CashierLogResponse with paginated items and today's total.
         """
         offset = (page - 1) * size
 
         total_count = await ClientPaymentEventDAO.count_by_admin_id(
-            session, admin_id, date_from=date_from, date_to=date_to
+            session, admin_id, date_from=date_from, date_to=date_to, payment_provider=payment_provider,
         )
         total_pages = max(1, math.ceil(total_count / size))
 
@@ -429,10 +432,18 @@ class PaymentPOSService:
             offset=offset,
             date_from=date_from,
             date_to=date_to,
+            payment_provider=payment_provider,
         )
 
         today_total = await ClientPaymentEventDAO.sum_today_by_admin_id(
             session, admin_id
+        )
+
+        summary = await ClientPaymentEventDAO.sum_by_provider_for_admin_id(
+            session,
+            admin_id,
+            date_from=date_from,
+            date_to=date_to,
         )
 
         items = [
@@ -455,6 +466,7 @@ class PaymentPOSService:
             size=size,
             total_pages=total_pages,
             today_total=today_total,
+            summary=CashierLogSummary(**summary),
         )
 
     @staticmethod
@@ -465,6 +477,7 @@ class PaymentPOSService:
         cashier_id: int | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        payment_provider: str | None = None,
     ) -> CashierLogResponse:
         """
         Return a paginated log of ALL payment events across every cashier.
@@ -484,6 +497,7 @@ class PaymentPOSService:
             cashier_id: Optional Admin DB PK to filter; None = all cashiers.
             date_from:  Optional inclusive lower bound filter (UTC-aware).
             date_to:    Optional inclusive upper bound filter (UTC-aware).
+            payment_provider: Optional provider filter for the log rows.
 
         Returns:
             CashierLogResponse with per-item ``cashier_id`` populated.
@@ -491,7 +505,7 @@ class PaymentPOSService:
         offset = (page - 1) * size
 
         total_count = await ClientPaymentEventDAO.count_by_admin_id(
-            session, cashier_id, date_from=date_from, date_to=date_to
+            session, cashier_id, date_from=date_from, date_to=date_to, payment_provider=payment_provider,
         )
         total_pages = max(1, math.ceil(total_count / size))
 
@@ -502,12 +516,20 @@ class PaymentPOSService:
             offset=offset,
             date_from=date_from,
             date_to=date_to,
+            payment_provider=payment_provider,
         )
 
         today_total = await ClientPaymentEventDAO.sum_today_by_admin_id(
             session, cashier_id
         )
-
+        
+        summary = await ClientPaymentEventDAO.sum_by_provider_for_admin_id(
+            session,
+            cashier_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        
         items = [
             CashierLogItem(
                 id=row["id"],
@@ -529,6 +551,7 @@ class PaymentPOSService:
             size=size,
             total_pages=total_pages,
             today_total=today_total,
+            summary=CashierLogSummary(**summary),
         )
 
     @staticmethod
