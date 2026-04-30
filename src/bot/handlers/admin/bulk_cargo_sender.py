@@ -1928,7 +1928,12 @@ async def manual_sent_handler(
             
             client = await ClientService().get_client_by_code(client_id, session)
             lookup_codes = client.active_codes if client else [client_id]
-            telegram_id = client.telegram_id if client else 0
+            telegram_id = client.telegram_id if client and client.telegram_id else 0
+            if telegram_id == 0:
+                logger.warning(
+                    "manual_sent_handler: creating debt with telegram_id=0 for client_code=%s",
+                    client_id,
+                )
             
             # Kurs va qadoqlash narxini olish
             static_data = await StaticDataDAO.get_first(session)
