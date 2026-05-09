@@ -31,10 +31,12 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_by_client_code(
         session: AsyncSession,
-        client_code: str | list[str],
+        client_code: str | list[str] | None,
         include_hidden: bool = False,
     ) -> list[ClientTransaction]:
         """Get all transactions for a client code or list of codes (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code:
+            return []
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             condition = func.upper(ClientTransaction.client_code).in_(
@@ -52,13 +54,15 @@ class ClientTransactionDAO:
     @staticmethod
     async def check_payment_exists(
         session: AsyncSession,
-        client_code: str | list[str],
-        reys: str,
+        client_code: str | list[str] | None,
+        reys: str | None,
         include_hidden: bool = False,
     ) -> bool:
         """Check if payment already exists for this flight (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code or not reys:
+            return False
         codes = [client_code] if isinstance(client_code, str) else client_code
-        upper_codes = [c.upper() for c in codes]
+        upper_codes = [c.upper() for c in codes if c]
 
         query = select(ClientTransaction).where(
             func.upper(ClientTransaction.client_code).in_(upper_codes),
@@ -87,12 +91,14 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_by_client_code_flight_row(
         session: AsyncSession,
-        client_code: str | list[str],
-        reys: str,
+        client_code: str | list[str] | None,
+        reys: str | None,
         qator_raqami: int,
         include_hidden: bool = False,
     ) -> ClientTransaction | None:
         """Get transaction by client_code, flight, and row number (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code or not reys:
+            return None
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             client_condition = func.upper(ClientTransaction.client_code).in_(
@@ -174,10 +180,12 @@ class ClientTransactionDAO:
     @staticmethod
     async def count_by_client_code(
         session: AsyncSession,
-        client_code: str | list[str],
+        client_code: str | list[str] | None,
         include_hidden: bool = False,
     ) -> int:
         """Count total transactions for a client code or list of codes (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code:
+            return 0
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             condition = func.upper(ClientTransaction.client_code).in_(
@@ -207,10 +215,12 @@ class ClientTransactionDAO:
     @staticmethod
     async def count_taken_away_by_client_code(
         session: AsyncSession,
-        client_code: str | list[str],
+        client_code: str | list[str] | None,
         include_hidden: bool = False,
     ) -> int:
         """Count taken away cargo for a client code or list of codes (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code:
+            return 0
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             condition = func.upper(ClientTransaction.client_code).in_(
@@ -242,10 +252,12 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_latest_by_client_code(
         session: AsyncSession,
-        client_code: str | list[str],
+        client_code: str | list[str] | None,
         include_hidden: bool = False,
     ) -> ClientTransaction | None:
         """Get latest transaction for a client code or list of codes (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code:
+            return None
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             condition = func.upper(ClientTransaction.client_code).in_(
@@ -284,7 +296,7 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_filtered_transactions(
         session: AsyncSession,
-        client_code: str | list[str],
+        client_code: str | list[str] | None,
         filter_type: str,
         sort_order: str,
         limit: int,
@@ -293,6 +305,8 @@ class ClientTransactionDAO:
         include_hidden: bool = True,
     ) -> list[ClientTransaction]:
         """Get filtered and sorted transactions (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code:
+            return []
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             client_condition = func.upper(ClientTransaction.client_code).in_(
@@ -405,8 +419,8 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_by_client_code_flight(
         session: AsyncSession,
-        client_code: str | list[str],
-        reys: str,
+        client_code: str | list[str] | None,
+        reys: str | None,
         include_hidden: bool = False,
     ) -> ClientTransaction | None:
         """
@@ -417,6 +431,8 @@ class ClientTransactionDAO:
         client_code + reys combination. This is a self-healing mechanism to
         recover from past backfill script errors without manual DB intervention.
         """
+        if not client_code or not reys:
+            return None
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             client_condition = func.upper(ClientTransaction.client_code).in_(
@@ -479,9 +495,11 @@ class ClientTransactionDAO:
 
     @staticmethod
     async def get_by_flight(
-        session: AsyncSession, flight_code: str, include_hidden: bool = False
+        session: AsyncSession, flight_code: str | None, include_hidden: bool = False
     ) -> list[ClientTransaction]:
         """Get all transactions for a specific flight (excludes UZPOST and WALLET_ADJ by default)."""
+        if not flight_code:
+            return []
         query = select(ClientTransaction).where(func.upper(ClientTransaction.reys) == flight_code.upper())
         query = apply_public_transaction_filter(query, include_hidden)
         query = query.order_by(ClientTransaction.created_at.desc())
@@ -521,10 +539,12 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_unique_flights_by_client_code(
         session: AsyncSession,
-        client_code: str | list[str],
+        client_code: str | list[str] | None,
         include_hidden: bool = False,
     ) -> list[str]:
         """Get unique flight codes for a client code or list of codes (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code:
+            return []
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             condition = func.upper(ClientTransaction.client_code).in_(
@@ -542,9 +562,11 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_distinct_paid_flights_by_client_code(
         session: AsyncSession,
-        client_code: str | list[str],
+        client_code: str | list[str] | None,
     ) -> list[str]:
         """Return distinct flight names that have at least one fully-paid, not-taken-away transaction."""
+        if not client_code:
+            return []
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             condition = func.upper(ClientTransaction.client_code).in_(client_codes_upper)
@@ -568,11 +590,13 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_by_client_code_and_flight(
         session: AsyncSession,
-        client_code: str | list[str],
-        reys: str,
+        client_code: str | list[str] | None,
+        reys: str | None,
         include_hidden: bool = False,
     ) -> list[ClientTransaction]:
         """Get all transactions by client_code and flight (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code or not reys:
+            return []
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             client_condition = func.upper(ClientTransaction.client_code).in_(
@@ -619,10 +643,12 @@ class ClientTransactionDAO:
 
     @staticmethod
     async def mark_as_taken_by_client_and_flights(
-        session: AsyncSession, client_codes: list[str], flights: list[str]
+        session: AsyncSession, client_codes: list[str] | None, flights: list[str] | None
     ):
         from datetime import datetime, timezone
 
+        if not client_codes or not flights:
+            return
         # Clean the list (remove None or empty strings)
         valid_codes = [c for c in client_codes if c]
         if not valid_codes or not flights:
@@ -732,12 +758,18 @@ class ClientTransactionDAO:
 
     @staticmethod
     async def get_wallet_balances(
-        session: AsyncSession, client_code: str | list[str]
+        session: AsyncSession, client_code: str | list[str] | None
     ) -> dict[str, float]:
         """
         Calculates Wallet balance and Debt separately.
         Returns a dict with positive 'wallet_balance' and negative 'debt'.
         """
+        if not client_code:
+            logger.warning(
+                "get_wallet_balances called with empty client_code: %r", client_code
+            )
+            return {"wallet_balance": 0.0, "debt": 0.0}
+
         try:
             if isinstance(client_code, list):
                 client_codes_upper = [c.upper() for c in client_code if c]
@@ -787,12 +819,12 @@ class ClientTransactionDAO:
             return {"wallet_balance": max(0.0, available_wallet), "debt": val_debt}
 
         except Exception as e:
-            logger.error(f"Wallet balance error for {client_code}: {e}")
+            logger.error("Wallet balance error for %r: %s", client_code, e)
             return {"wallet_balance": 0.0, "debt": 0.0}
 
     @staticmethod
     async def sum_payment_balance_difference_by_client_code(
-        session: AsyncSession, client_code: str | list[str]
+        session: AsyncSession, client_code: str | list[str] | None
     ) -> float:
         """Backward-compatible wrapper. Returns merged balance for legacy callers."""
         balances = await ClientTransactionDAO.get_wallet_balances(session, client_code)
@@ -803,12 +835,14 @@ class ClientTransactionDAO:
     @staticmethod
     async def count_filtered_transactions_by_client_code(
         session: AsyncSession,
-        client_code: str | list[str],
+        client_code: str | list[str] | None,
         filter_type: str,
         flight_code: str | None = None,
         include_hidden: bool = False,
     ) -> int:
         """Count filtered transactions by client_code(s) (excludes UZPOST and WALLET_ADJ by default)."""
+        if not client_code:
+            return 0
         if isinstance(client_code, list):
             client_codes_upper = [c.upper() for c in client_code if c]
             client_condition = func.upper(ClientTransaction.client_code).in_(
@@ -860,7 +894,7 @@ class ClientTransactionDAO:
     @staticmethod
     async def get_transactions_by_flight_filtered(
         session: AsyncSession,
-        flight_name: str,
+        flight_name: str | None,
         filter_type: str = "all",
         sort_order: str = "asc",
         limit: int = 50,
@@ -872,6 +906,8 @@ class ClientTransactionDAO:
         Unlike ``get_filtered_transactions``, this method has NO client_code
         requirement — the flight_name is the sole primary filter.
         """
+        if not flight_name:
+            return []
         query = (
             select(ClientTransaction)
             .where(func.upper(ClientTransaction.reys) == flight_name.upper())
@@ -909,10 +945,12 @@ class ClientTransactionDAO:
     @staticmethod
     async def count_transactions_by_flight_filtered(
         session: AsyncSession,
-        flight_name: str,
+        flight_name: str | None,
         filter_type: str = "all",
     ) -> int:
         """Count transactions for a specific flight with optional filters (no client_code required)."""
+        if not flight_name:
+            return 0
         query = (
             select(func.count(ClientTransaction.id))
             .where(func.upper(ClientTransaction.reys) == flight_name.upper())

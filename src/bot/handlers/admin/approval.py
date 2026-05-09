@@ -239,10 +239,45 @@ async def approve_client(
                         InputMediaPhoto(media=resolved[0], caption=caption, parse_mode="HTML"),
                         *[InputMediaPhoto(media=r) for r in resolved[1:]],
                     ]
-                    await bot.send_media_group(
-                        chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
-                        media=media,
-                    )
+                    try:
+                        await bot.send_media_group(
+                            chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
+                            media=media,
+                        )
+                    except Exception as mg_err:
+                        # WEBPAGE_CURL_FAILED can happen when Telegram servers
+                        # cannot fetch S3 presigned URLs. Fallback to sending
+                        # photos one-by-one so at least the caption + some
+                        # images get through.
+                        logger.warning(
+                            "Media group failed for %s (%s), trying individual sends: %s",
+                            telegram_id, client.primary_code or "?", mg_err,
+                        )
+                        try:
+                            for idx, r in enumerate(resolved):
+                                if idx == 0:
+                                    await bot.send_photo(
+                                        chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
+                                        photo=r,
+                                        caption=caption,
+                                        parse_mode="HTML",
+                                    )
+                                else:
+                                    await bot.send_photo(
+                                        chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
+                                        photo=r,
+                                    )
+                        except Exception as single_err:
+                            logger.error(
+                                "Individual photo sends also failed for %s: %s",
+                                telegram_id, single_err,
+                            )
+                            # Final fallback: text-only notification
+                            await bot.send_message(
+                                chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
+                                text=caption,
+                                parse_mode="HTML",
+                            )
             else:
                 logger.warning(f"Invalid passport_images format for {telegram_id}, sending text only")
                 await bot.send_message(
