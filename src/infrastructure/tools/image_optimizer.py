@@ -1,7 +1,11 @@
 import asyncio
 import io
 import logging
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
+
+# Allow Pillow to process truncated/partial images (e.g. incomplete uploads)
+# instead of raising OSError. Missing pixels are filled with grey.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 try:
     import pillow_heif

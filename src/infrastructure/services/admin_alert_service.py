@@ -120,4 +120,4 @@ class AdminAlertService:
                         text=text
                     )
                 except Exception as e:
-                    logger.error(f"Yangi qurilma xabarini super-admin {admin_id} ga yuborib bo‘lmadi: {e}")
+                    logger.warning(f"Yangi qurilma xabarini super-admin {admin_id} ga yuborib bo’lmadi: {e}")

@@ -599,8 +599,8 @@ async def register(
                 await s3_manager.delete_file(key)
             except Exception:
                 pass
-        logger.error(
-            "S3 upload failed for telegram_id=%s: %s", telegram_id, e, exc_info=True
+        logger.warning(
+            "S3 upload failed for telegram_id=%s: %s", telegram_id, e
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

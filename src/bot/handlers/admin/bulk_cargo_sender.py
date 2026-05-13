@@ -350,13 +350,7 @@ class ChannelLogger:
         photo_file_ids: list[str],
     ) -> None:
         """Log successful send to success channel."""
-        header = self._build_header(
-            status="✅ <b>Muvaffaqiyatli yuborildi</b>",
-            flight_name=flight_name,
-            client_id=client_id,
-            telegram_id=telegram_id,
-            message_text=message_text,
-        )
+        header = f"✅ <b>Muvaffaqiyatli yuborildi</b>\n\n{message_text}"
         await self._send_log(self.success_channel, header, photo_file_ids)
 
     async def log_failure(
