@@ -226,7 +226,19 @@ async def approve_client(
             if isinstance(file_ids, list) and file_ids:
                 resolved = await resolve_passport_items(file_ids)
 
-                if len(resolved) == 1:
+                # Filter out any empty/None resolved items before sending
+                resolved = [r for r in resolved if r]
+                if not resolved:
+                    logger.warning(
+                        "All passport image references resolved to empty for %s, sending text only",
+                        telegram_id,
+                    )
+                    await bot.send_message(
+                        chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
+                        text=caption,
+                        parse_mode="HTML",
+                    )
+                elif len(resolved) == 1:
                     await bot.send_photo(
                         chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
                         photo=resolved[0],
@@ -245,16 +257,17 @@ async def approve_client(
                             media=media,
                         )
                     except Exception as mg_err:
-                        # WEBPAGE_CURL_FAILED can happen when Telegram servers
-                        # cannot fetch S3 presigned URLs. Fallback to sending
-                        # photos one-by-one so at least the caption + some
-                        # images get through.
+                        # WEBPAGE_CURL_FAILED / wrong content type can happen when
+                        # Telegram servers cannot fetch S3 presigned URLs.
+                        # Fallback to sending photos one-by-one with per-item
+                        # error handling so one bad URL doesn't abort the rest.
                         logger.warning(
                             "Media group failed for %s (%s), trying individual sends: %s",
                             telegram_id, client.primary_code or "?", mg_err,
                         )
-                        try:
-                            for idx, r in enumerate(resolved):
+                        sent_count = 0
+                        for idx, r in enumerate(resolved):
+                            try:
                                 if idx == 0:
                                     await bot.send_photo(
                                         chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
@@ -267,10 +280,16 @@ async def approve_client(
                                         chat_id=config.telegram.TASDIQLANGANLAR_CHANNEL_ID,
                                         photo=r,
                                     )
-                        except Exception as single_err:
+                                sent_count += 1
+                            except Exception as item_err:
+                                logger.warning(
+                                    "Failed to send passport photo %s/%s for %s (%s): %s",
+                                    idx + 1, len(resolved), telegram_id,
+                                    client.primary_code or "?", item_err,
+                                )
+                        if sent_count == 0:
                             logger.error(
-                                "Individual photo sends also failed for %s: %s",
-                                telegram_id, single_err,
+                                "All individual photo sends failed for %s", telegram_id
                             )
                             # Final fallback: text-only notification
                             await bot.send_message(

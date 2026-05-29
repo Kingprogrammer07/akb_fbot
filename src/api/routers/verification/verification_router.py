@@ -184,10 +184,10 @@ async def get_unpaid_cargo(
 async def get_client_flights(
     client_code: str,
     include_sheets: bool = Query(
-        ..., description="Include flights from Google Sheets (required)"
+        True, description="Include flights from Google Sheets"
     ),
     include_database: bool = Query(
-        ..., description="Include flights from database (required)"
+        True, description="Include flights from database"
     ),
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),

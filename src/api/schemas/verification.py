@@ -224,9 +224,9 @@ class UnpaidCargoListResponse(BaseModel):
 # ============================================================================
 
 class FlightListRequest(BaseModel):
-    """Request parameters for flight list - filters required."""
-    include_sheets: bool = Field(..., description="Include Google Sheets flights (required)")
-    include_database: bool = Field(..., description="Include database flights (required)")
+    """Request parameters for flight list."""
+    include_sheets: bool = Field(True, description="Include Google Sheets flights")
+    include_database: bool = Field(True, description="Include database flights")
 
 
 class FlightListResponse(BaseModel):
