@@ -1649,7 +1649,7 @@ async def export_transactions_excel(
             for code_val in (await session.execute(direct_stmt)).scalars():
                 if code_val:
                     code_variants_set.add(code_val)
-        client_code_filter = list(code_variants_set) or None
+        client_code_filter = list(code_variants_set)
 
     # ---- fetch all (no pagination) ----
     if client_code_filter is not None:
@@ -1712,8 +1712,6 @@ async def export_transactions_excel(
         ws.column_dimensions[cell.column_letter].width = width
 
     ws.row_dimensions[1].height = 28
-
-    tz_offset = "+05"
 
     def _fmt_dt(dt: datetime | None) -> str:
         if not dt:
