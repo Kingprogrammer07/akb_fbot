@@ -18,14 +18,18 @@ Permission map:
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
 import uuid
+from collections import defaultdict
 from datetime import datetime
 from html import escape
 from typing import Annotated
 
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
 from aiogram.types import InputMediaPhoto
 from fastapi import (
     APIRouter,
@@ -37,6 +41,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import AdminJWTPayload, get_db, require_permission
@@ -1581,3 +1586,204 @@ async def search_transactions_grouped(
         size=size
     )
 
+
+# ---------------------------------------------------------------------------
+# Excel export
+# ---------------------------------------------------------------------------
+
+_PAYMENT_STATUS_LABELS = {"paid": "To'langan", "pending": "Kutilmoqda", "partial": "Qisman"}
+_TAKEN_LABELS = {True: "Ha", False: "Yo'q"}
+
+
+@router.get(
+    "/transactions/export-excel",
+    summary="Ombor tranzaksiyalarini Excel formatida yuklab olish",
+)
+async def export_transactions_excel(
+    code: Annotated[str | None, Query(max_length=50)] = None,
+    phone: Annotated[str | None, Query(max_length=30)] = None,
+    name: Annotated[str | None, Query(max_length=100)] = None,
+    q: Annotated[str | None, Query(max_length=100)] = None,
+    flight: Annotated[str | None, Query(max_length=50)] = None,
+    payment_status: PaymentStatusFilter = "all",
+    taken_status: TakenStatusFilter = "all",
+    admin: AdminJWTPayload = Depends(require_permission("warehouse", "read")),
+    session: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    from sqlalchemy import select, func
+    from src.infrastructure.database.models.client_transaction import ClientTransaction
+
+    code = code.strip() if code and code.strip() else None
+    phone = phone.strip() if phone and phone.strip() else None
+    name = name.strip() if name and name.strip() else None
+    q = q.strip() if q and q.strip() else None
+    flight = flight.strip() if flight and flight.strip() else None
+
+    if taken_status == "taken":
+        dao_filter_type = "taken"
+    elif taken_status == "not_taken":
+        dao_filter_type = "not_taken"
+    else:
+        dao_filter_type = payment_status
+
+    # ---- build base query ----
+    use_client_filter = any([code, phone, name, q])
+    client_code_filter: list[str] | None = None
+
+    if use_client_filter:
+        matched_clients, _ = await ClientDAO.search_clients_paginated(
+            session, page=1, size=500, code=code, phone=phone, name=name, query=q
+        )
+        code_variants_set: set[str] = set()
+        for c in matched_clients:
+            for attr in ("extra_code", "client_code", "legacy_code"):
+                val = getattr(c, attr, None)
+                if val:
+                    code_variants_set.add(val)
+        search_str = code or q
+        if search_str:
+            q_upper = f"%{search_str.upper()}%"
+            direct_stmt = select(ClientTransaction.client_code).where(
+                func.upper(ClientTransaction.client_code).ilike(q_upper)
+            ).distinct()
+            for code_val in (await session.execute(direct_stmt)).scalars():
+                if code_val:
+                    code_variants_set.add(code_val)
+        client_code_filter = list(code_variants_set) or None
+
+    # ---- fetch all (no pagination) ----
+    if client_code_filter is not None:
+        if not client_code_filter:
+            transactions = []
+        else:
+            from src.infrastructure.database.dao.filters import apply_public_transaction_filter
+            codes_upper = [c.upper() for c in client_code_filter if c]
+            q_stmt = (
+                select(ClientTransaction)
+                .where(func.upper(ClientTransaction.client_code).in_(codes_upper))
+            )
+            q_stmt = apply_public_transaction_filter(q_stmt, include_hidden=True)
+            if flight:
+                q_stmt = q_stmt.where(
+                    func.upper(ClientTransaction.reys) == flight.upper()
+                )
+            q_stmt = _apply_filter_type(q_stmt, dao_filter_type)
+            q_stmt = q_stmt.order_by(ClientTransaction.created_at.asc())
+            transactions = list((await session.execute(q_stmt)).scalars().all())
+    else:
+        from src.infrastructure.database.dao.filters import apply_public_transaction_filter
+        q_stmt = select(ClientTransaction)
+        if flight:
+            q_stmt = q_stmt.where(func.upper(ClientTransaction.reys) == flight.upper())
+        q_stmt = apply_public_transaction_filter(q_stmt, include_hidden=False)
+        q_stmt = _apply_filter_type(q_stmt, dao_filter_type)
+        q_stmt = q_stmt.order_by(ClientTransaction.reys.asc(), ClientTransaction.client_code.asc())
+        transactions = list((await session.execute(q_stmt)).scalars().all())
+
+    # ---- build client lookup ----
+    client_map: dict[str, object] = {}
+    unique_codes = {(tx.client_code or "").upper() for tx in transactions}
+    for c_code in unique_codes:
+        client_obj = await ClientDAO.get_by_client_code(session, c_code)
+        if client_obj:
+            client_map[c_code] = client_obj
+
+    # ---- build Excel ----
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = flight or "Ombor"
+
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(fill_type="solid", fgColor="1D4ED8")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    headers = [
+        "#", "Mijoz kodi", "Ism Familiya", "Telefon",
+        "Reys", "Vazn (kg)", "Jami summa", "To'langan", "Qolgan",
+        "To'lov holati", "Olib ketilganmi", "Olib ketilgan sana", "Yaratilgan sana",
+    ]
+    col_widths = [5, 14, 22, 16, 14, 12, 14, 14, 14, 16, 16, 20, 20]
+
+    for col_idx, (header, width) in enumerate(zip(headers, col_widths), start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+        ws.column_dimensions[cell.column_letter].width = width
+
+    ws.row_dimensions[1].height = 28
+
+    tz_offset = "+05"
+
+    def _fmt_dt(dt: datetime | None) -> str:
+        if not dt:
+            return ""
+        return dt.strftime("%Y-%m-%d %H:%M")
+
+    for row_idx, tx in enumerate(transactions, start=2):
+        c_code = (tx.client_code or "").upper()
+        client_obj = client_map.get(c_code)
+        full_name = client_obj.full_name if client_obj else ""
+        phone_num = client_obj.phone if client_obj else ""
+
+        row = [
+            row_idx - 1,
+            tx.client_code or "",
+            full_name or "",
+            phone_num or "",
+            tx.reys or "",
+            float(tx.vazn) if tx.vazn and tx.vazn.replace(".", "", 1).isdigit() else "",
+            float(tx.summa) if tx.summa else 0,
+            float(tx.paid_amount) if tx.paid_amount else 0,
+            float(tx.remaining_amount) if tx.remaining_amount else 0,
+            _PAYMENT_STATUS_LABELS.get(tx.payment_status, tx.payment_status or ""),
+            _TAKEN_LABELS.get(tx.is_taken_away, ""),
+            _fmt_dt(tx.taken_away_date),
+            _fmt_dt(tx.created_at),
+        ]
+        for col_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.alignment = Alignment(vertical="center")
+
+        # zebra stripe
+        if row_idx % 2 == 0:
+            fill = PatternFill(fill_type="solid", fgColor="EFF6FF")
+            for col_idx in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = fill
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    safe_flight = (flight or "ombor").replace(" ", "_")
+    today = datetime.now().strftime("%Y%m%d")
+    filename = f"warehouse_{safe_flight}_{today}.xlsx"
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _apply_filter_type(query, filter_type: str):
+    from src.infrastructure.database.models.client_transaction import ClientTransaction
+    if filter_type == "paid":
+        return query.where(
+            ClientTransaction.payment_status == "paid",
+            ClientTransaction.remaining_amount <= 0,
+        )
+    elif filter_type == "unpaid":
+        return query.where(ClientTransaction.payment_status == "pending")
+    elif filter_type == "partial":
+        return query.where(
+            ClientTransaction.payment_status == "partial",
+            ClientTransaction.remaining_amount > 0,
+        )
+    elif filter_type == "taken":
+        return query.where(ClientTransaction.is_taken_away == True)  # noqa: E712
+    elif filter_type == "not_taken":
+        return query.where(ClientTransaction.is_taken_away == False)  # noqa: E712
+    return query
