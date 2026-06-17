@@ -86,6 +86,7 @@ from src.api.routers.admin_calculator import router as admin_calculator_router
 from src.api.routers.china_address import router as china_address_router
 from src.api.routers.warehouse_router import router as warehouse_router
 from src.api.routers.shipment_router import router as shipment_router
+from src.api.routers.debug_tools import router as debug_tools_router
 
 from fastapi.staticfiles import StaticFiles
 from src.api.middleware.request_logging import RequestLoggingMiddleware
@@ -385,6 +386,7 @@ app.include_router(admin_calculator_router, prefix="/api/v1")
 app.include_router(china_address_router, prefix="/api/v1")
 app.include_router(warehouse_router, prefix="/api/v1")
 app.include_router(shipment_router, prefix="/api/v1")
+app.include_router(debug_tools_router, prefix="/api/v1")
 app.include_router(expected_cargo_router, prefix="/api/v1")
 from src.api.routers.partner_router import router as partner_router
 app.include_router(partner_router, prefix="/api/v1")
