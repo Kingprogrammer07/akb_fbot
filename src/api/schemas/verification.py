@@ -14,8 +14,8 @@ SortOrder = Literal["asc", "desc"]
 PaymentStatus = Literal["pending", "partial", "paid"]
 PaymentType = Literal["online", "cash"]
 PaymentProvider = Literal["cash", "click", "payme"]
-DeliveryRequestType = Literal["uzpost", "bts", "mandarin", "yandex"]
-DeliveryProofMethod = Literal["uzpost", "bts", "mandarin", "yandex", "self_pickup"]
+DeliveryRequestType = Literal["uzpost", "bts", "akb", "yandex"]
+DeliveryProofMethod = Literal["uzpost", "bts", "akb", "yandex", "self_pickup"]
 BalanceStatus = Literal["debt", "overpaid", "balanced"]
 
 

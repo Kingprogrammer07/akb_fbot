@@ -168,6 +168,9 @@ async def get_current_user(
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
             client = await _authenticate_bearer(auth_header, redis, session)
+            request.state.user_id = client.telegram_id or client.id
+            request.state.client_id = client.id
+            request.state.client_code = client.client_code
             from src.config import config
             if client.telegram_id and config.telegram.ADMIN_ACCESS_IDs:
                 if client.telegram_id in config.telegram.ADMIN_ACCESS_IDs:
@@ -178,6 +181,9 @@ async def get_current_user(
     init_data = request.headers.get("X-Telegram-Init-Data")
     if init_data:
             client = await _authenticate_telegram(init_data, session)
+            request.state.user_id = client.telegram_id or client.id
+            request.state.client_id = client.id
+            request.state.client_code = client.client_code
             from src.config import config
             if client.telegram_id and config.telegram.ADMIN_ACCESS_IDs:
                 if client.telegram_id in config.telegram.ADMIN_ACCESS_IDs:
@@ -267,13 +273,17 @@ async def get_admin_from_jwt(
             headers={"WWW-Authenticate": "Bearer"},
         )
         
-    return AdminJWTPayload(
+    admin_payload = AdminJWTPayload(
         admin_id=int(payload["sub"]),
         role_name=payload["role"],
         jti=jti,
         home_page=payload.get("home_page"),
         permissions=payload.get("permissions") or [],
     )
+    request.state.user_id = admin_payload.admin_id
+    request.state.admin_id = admin_payload.admin_id
+    request.state.admin_role = admin_payload.role_name
+    return admin_payload
 
 
 def require_permission(resource: str, action: str) -> Callable:

@@ -26,7 +26,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 from html import escape
-from typing import Annotated
+from typing import Annotated, Any
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -38,6 +38,7 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
@@ -165,6 +166,93 @@ async def _resolve_warehouse_admin_label(
         admin_id=admin.admin_id,
         fallback_role_name=admin.role_name,
     )
+
+
+def _money_to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _warehouse_transaction_error_item(
+    tx: Any,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    return {
+        "transaction_id": getattr(tx, "id", None),
+        "client_code": getattr(tx, "client_code", None),
+        "client_full_name": getattr(client, "full_name", None),
+        "client_phone": getattr(client, "phone", None),
+        "telegram_id": getattr(client, "telegram_id", None)
+        or getattr(tx, "telegram_id", None),
+        "flight_name": getattr(tx, "reys", None),
+        "row_number": getattr(tx, "qator_raqami", None),
+        "payment_status": getattr(tx, "payment_status", None),
+        "paid_amount": _money_to_float(getattr(tx, "paid_amount", None)),
+        "total_amount": _money_to_float(getattr(tx, "total_amount", None)),
+        "remaining_amount": _money_to_float(getattr(tx, "remaining_amount", None)),
+        "is_taken_away": getattr(tx, "is_taken_away", None),
+        "taken_away_date": str(getattr(tx, "taken_away_date", None) or ""),
+    }
+
+
+def _set_warehouse_error_context(
+    request: Request,
+    *,
+    operation: str,
+    admin: AdminJWTPayload,
+    delivery_method: str | None = None,
+    raw_transaction_ids: str | None = None,
+    transaction_ids: list[int] | None = None,
+    transactions: list[Any] | None = None,
+    clients_by_code: dict[str, Any] | None = None,
+    comment: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    clients_by_code = clients_by_code or {}
+    context: dict[str, Any] = {
+        "operation": operation,
+        "admin_id": admin.admin_id,
+        "admin_role": admin.role_name,
+        "delivery_method": delivery_method,
+        "raw_transaction_ids": raw_transaction_ids,
+        "transaction_ids": transaction_ids,
+        "comment": comment,
+    }
+    if transactions:
+        transaction_items: list[dict[str, Any]] = []
+        for tx in transactions:
+            client_code = (getattr(tx, "client_code", None) or "").strip().upper()
+            transaction_items.append(
+                _warehouse_transaction_error_item(
+                    tx,
+                    clients_by_code.get(client_code),
+                )
+            )
+        context["transactions"] = transaction_items
+    if extra:
+        context.update(extra)
+    request.state.error_context = context
+
+
+async def _load_clients_by_transaction_code(
+    session: AsyncSession,
+    transactions: list[Any],
+) -> dict[str, Any]:
+    clients_by_code: dict[str, Any] = {}
+    codes = {
+        (getattr(tx, "client_code", None) or "").strip().upper()
+        for tx in transactions
+        if (getattr(tx, "client_code", None) or "").strip()
+    }
+    for code in codes:
+        client = await ClientDAO.get_by_client_code(session, code)
+        if client:
+            clients_by_code[code] = client
+    return clients_by_code
 
 
 def _build_payment_status_label(payment_status: str, remaining_amount: float) -> str:
@@ -917,6 +1005,7 @@ async def list_flight_transactions(
     summary="Bir nechta yukni olib ketildi deb belgilash (1 marta rasm yuklash bilan)",
 )
 async def bulk_mark_cargo_taken(
+    request: Request,
     transaction_ids: str = Form(
         ..., description="Tranzaksiya ID lari vergul bilan ajratilgan (masalan: 101,102,105) yoki JSON ro'yxat"
     ),
@@ -939,17 +1028,39 @@ async def bulk_mark_cargo_taken(
     4. Set ClientTransaction.is_taken_away = True.
     5. Send a single bulk Telegram notification.
     """
+    _set_warehouse_error_context(
+        request,
+        operation="bulk_mark_cargo_taken",
+        admin=admin,
+        delivery_method=delivery_method,
+        raw_transaction_ids=transaction_ids,
+        comment=comment,
+    )
+
     # Parse transaction_ids
     try:
         if transaction_ids.strip().startswith("["):
-            t_ids = json.loads(transaction_ids)
+            parsed_ids = json.loads(transaction_ids)
         else:
-            t_ids = [int(x.strip()) for x in transaction_ids.split(",") if x.strip()]
+            parsed_ids = [x.strip() for x in transaction_ids.split(",") if x.strip()]
+        if not isinstance(parsed_ids, list):
+            raise ValueError("transaction_ids must be a list")
+        t_ids = [int(tx_id) for tx_id in parsed_ids]
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Noto'g'ri transaction_ids formati. Vergul bilan ajratilgan sonlar yoki JSON ro'yxat bering."
         )
+
+    _set_warehouse_error_context(
+        request,
+        operation="bulk_mark_cargo_taken",
+        admin=admin,
+        delivery_method=delivery_method,
+        raw_transaction_ids=transaction_ids,
+        transaction_ids=t_ids,
+        comment=comment,
+    )
 
     if not t_ids:
         raise HTTPException(
@@ -960,17 +1071,6 @@ async def bulk_mark_cargo_taken(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="transaction_ids ichida takroriy ID bo'lmasligi kerak.",
-        )
-
-    if len(photos) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Kamida bitta rasm yuborilishi shart.",
-        )
-    if len(photos) > _MAX_PHOTOS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Rasm soni {_MAX_PHOTOS} tadan oshmasligi kerak.",
         )
 
     # Validate all transactions exist and are not already proven
@@ -989,6 +1089,32 @@ async def bulk_mark_cargo_taken(
         )
 
     ordered_transactions = [tx_by_id[tx_id] for tx_id in t_ids]
+    clients_by_code = await _load_clients_by_transaction_code(
+        session, ordered_transactions
+    )
+    _set_warehouse_error_context(
+        request,
+        operation="bulk_mark_cargo_taken",
+        admin=admin,
+        delivery_method=delivery_method,
+        raw_transaction_ids=transaction_ids,
+        transaction_ids=t_ids,
+        transactions=ordered_transactions,
+        clients_by_code=clients_by_code,
+        comment=comment,
+    )
+
+    if len(photos) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Kamida bitta rasm yuborilishi shart.",
+        )
+    if len(photos) > _MAX_PHOTOS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Rasm soni {_MAX_PHOTOS} tadan oshmasligi kerak.",
+        )
+
     normalized_client_codes = {
         (tx.client_code or "").strip().upper() for tx in ordered_transactions
     }
@@ -1053,11 +1179,43 @@ async def bulk_mark_cargo_taken(
             )
             s3_keys.append(s3_key)
         except Exception as exc:
-            logger.exception("Bulk photo upload error idx=%d", idx)
+            _set_warehouse_error_context(
+                request,
+                operation="bulk_mark_cargo_taken",
+                admin=admin,
+                delivery_method=delivery_method,
+                raw_transaction_ids=transaction_ids,
+                transaction_ids=t_ids,
+                transactions=ordered_transactions,
+                clients_by_code=clients_by_code,
+                comment=comment,
+                extra={
+                    "failed_stage": "photo_upload",
+                    "failed_photo_index": idx,
+                },
+            )
+            logger.exception(
+                "Bulk photo upload error idx=%d context=%s",
+                idx,
+                getattr(request.state, "error_context", None),
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"{idx + 1}-rasmni yuklashda xatolik yuz berdi.",
             ) from exc
+
+    _set_warehouse_error_context(
+        request,
+        operation="bulk_mark_cargo_taken",
+        admin=admin,
+        delivery_method=delivery_method,
+        raw_transaction_ids=transaction_ids,
+        transaction_ids=t_ids,
+        transactions=ordered_transactions,
+        clients_by_code=clients_by_code,
+        comment=comment,
+        extra={"photo_s3_keys": s3_keys},
+    )
 
     # --- Database Persist (Multiple Proofs, Same S3 Keys) ---
     proofs_created = 0
@@ -1066,40 +1224,90 @@ async def bulk_mark_cargo_taken(
 
     for tx in ordered_transactions:
         # 1. Create proof
-        await CargoDeliveryProofDAO.create(
+        try:
+            await CargoDeliveryProofDAO.create(
+                session=session,
+                transaction_id=tx.id,
+                delivery_method=delivery_method,
+                photo_s3_keys=s3_keys,
+                marked_by_admin_id=admin.admin_id,
+            )
+            proofs_created += 1
+
+            # 2. Mark taken
+            if not tx.is_taken_away:
+                tx.is_taken_away = True
+                tx.taken_away_date = now
+
+            # Collect data for notification
+            flight_name = (tx.reys or "").strip() or "Noma'lum"
+            flight_counts[flight_name] = flight_counts.get(flight_name, 0) + 1
+        except Exception as exc:
+            _set_warehouse_error_context(
+                request,
+                operation="bulk_mark_cargo_taken",
+                admin=admin,
+                delivery_method=delivery_method,
+                raw_transaction_ids=transaction_ids,
+                transaction_ids=t_ids,
+                transactions=ordered_transactions,
+                clients_by_code=clients_by_code,
+                comment=comment,
+                extra={
+                    "photo_s3_keys": s3_keys,
+                    "failed_transaction_id": tx.id,
+                },
+            )
+            logger.exception(
+                "Bulk mark-taken proof persist failed: %s",
+                getattr(request.state, "error_context", None),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Yukni olib ketildi deb saqlashda DB xatoligi yuz berdi.",
+            ) from exc
+
+    try:
+        # Log to Audit
+        await AdminAuditLogDAO.log(
             session=session,
-            transaction_id=tx.id,
-            delivery_method=delivery_method,
-            photo_s3_keys=s3_keys,
-            marked_by_admin_id=admin.admin_id,
+            action="bulk_mark_cargo_taken",
+            admin_id=admin.admin_id,
+            role_snapshot=admin.role_name,
+            details={
+                "target_id": base_tx_id,  # Using first ID as reference
+                "transaction_ids": t_ids,
+                "delivery_method": delivery_method,
+                "photo_count": len(s3_keys),
+                "comment": comment,
+            },
         )
-        proofs_created += 1
 
-        # 2. Mark taken
-        if not tx.is_taken_away:
-            tx.is_taken_away = True
-            tx.taken_away_date = now
-
-        # Collect data for notification
-        flight_name = (tx.reys or "").strip() or "Noma'lum"
-        flight_counts[flight_name] = flight_counts.get(flight_name, 0) + 1
-
-    # Log to Audit
-    await AdminAuditLogDAO.log(
-        session=session,
-        action="bulk_mark_cargo_taken",
-        admin_id=admin.admin_id,
-        role_snapshot=admin.role_name,
-        details={
-            "target_id": base_tx_id,  # Using first ID as reference
-            "transaction_ids": t_ids,
-            "delivery_method": delivery_method,
-            "photo_count": len(s3_keys),
-            "comment": comment,
-        },
-    )
-
-    await session.commit()
+        await session.commit()
+    except Exception as exc:
+        _set_warehouse_error_context(
+            request,
+            operation="bulk_mark_cargo_taken",
+            admin=admin,
+            delivery_method=delivery_method,
+            raw_transaction_ids=transaction_ids,
+            transaction_ids=t_ids,
+            transactions=ordered_transactions,
+            clients_by_code=clients_by_code,
+            comment=comment,
+            extra={
+                "photo_s3_keys": s3_keys,
+                "failed_stage": "audit_or_commit",
+            },
+        )
+        logger.exception(
+            "Bulk mark-taken commit/audit failed: %s",
+            getattr(request.state, "error_context", None),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Yukni olib ketildi deb saqlashda DB xatoligi yuz berdi.",
+        ) from exc
 
     admin_label = await _resolve_warehouse_admin_label(session, admin)
     telegram_notified = await _send_bulk_taken_away_notification(
@@ -1133,6 +1341,7 @@ async def bulk_mark_cargo_taken(
 )
 async def mark_cargo_taken(
     transaction_id: int,
+    request: Request,
     delivery_method: DeliveryMethod = Form(
         ..., description="Yetkazib berish usuli: uzpost | bts | akb | yandex"
     ),
@@ -1160,16 +1369,14 @@ async def mark_cargo_taken(
     worker with appropriate permissions.  Payment recovery is a separate
     business process.
     """
-    if len(photos) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Kamida bitta rasm yuborilishi shart.",
-        )
-    if len(photos) > _MAX_PHOTOS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Rasm soni {_MAX_PHOTOS} tadan oshmasligi kerak.",
-        )
+    _set_warehouse_error_context(
+        request,
+        operation="mark_cargo_taken",
+        admin=admin,
+        delivery_method=delivery_method,
+        transaction_ids=[transaction_id],
+        comment=comment,
+    )
 
     transaction = None
     if transaction_id > 0:
@@ -1226,6 +1433,34 @@ async def mark_cargo_taken(
             detail=f"{transaction_id} raqamli tranzaksiya/yuk topilmadi.",
         )
 
+    client_obj = await ClientDAO.get_by_client_code(session, transaction.client_code)
+    clients_by_code = (
+        {(transaction.client_code or "").strip().upper(): client_obj}
+        if client_obj
+        else {}
+    )
+    _set_warehouse_error_context(
+        request,
+        operation="mark_cargo_taken",
+        admin=admin,
+        delivery_method=delivery_method,
+        transaction_ids=[transaction_id],
+        transactions=[transaction],
+        clients_by_code=clients_by_code,
+        comment=comment,
+    )
+
+    if len(photos) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Kamida bitta rasm yuborilishi shart.",
+        )
+    if len(photos) > _MAX_PHOTOS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Rasm soni {_MAX_PHOTOS} tadan oshmasligi kerak.",
+        )
+
     # Track whether transaction was already marked taken (e.g. via delivery request approval).
     # We still allow the warehouse worker to upload proof in that case — don't block them.
     already_taken = transaction.is_taken_away
@@ -1276,52 +1511,102 @@ async def mark_cargo_taken(
             )
             s3_keys.append(s3_key)
         except Exception as exc:
-            logger.error(
-                "S3 upload failed for proof photo %d (tx=%d): %s",
+            _set_warehouse_error_context(
+                request,
+                operation="mark_cargo_taken",
+                admin=admin,
+                delivery_method=delivery_method,
+                transaction_ids=[transaction_id],
+                transactions=[transaction],
+                clients_by_code=clients_by_code,
+                comment=comment,
+                extra={
+                    "failed_stage": "photo_upload",
+                    "failed_photo_index": idx,
+                },
+            )
+            logger.exception(
+                "S3 upload failed for proof photo %d (tx=%d): %s context=%s",
                 idx + 1,
                 transaction_id,
                 exc,
+                getattr(request.state, "error_context", None),
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"{idx + 1}-rasmni S3 ga yuklashda xatolik yuz berdi.",
-            )
+            ) from exc
 
-    # --- Persist proof record ---
-    proof = await CargoDeliveryProofDAO.create(
-        session=session,
-        transaction_id=transaction_id,
+    _set_warehouse_error_context(
+        request,
+        operation="mark_cargo_taken",
+        admin=admin,
         delivery_method=delivery_method,
-        photo_s3_keys=s3_keys,
-        marked_by_admin_id=admin.admin_id,
+        transaction_ids=[transaction_id],
+        transactions=[transaction],
+        clients_by_code=clients_by_code,
+        comment=comment,
+        extra={"photo_s3_keys": s3_keys},
     )
 
-    # --- Update transaction (only if not already taken) ---
-    if not already_taken:
-        transaction.is_taken_away = True
-        transaction.taken_away_date = now
-        session.add(transaction)
+    try:
+        # --- Persist proof record ---
+        proof = await CargoDeliveryProofDAO.create(
+            session=session,
+            transaction_id=transaction_id,
+            delivery_method=delivery_method,
+            photo_s3_keys=s3_keys,
+            marked_by_admin_id=admin.admin_id,
+        )
 
-    # --- Audit log ---
-    await AdminAuditLogDAO.log(
-        session=session,
-        action="WAREHOUSE_MARKED_TAKEN",
-        admin_id=admin.admin_id,
-        role_snapshot=admin.role_name,
-        details={
-            "transaction_id": transaction_id,
-            "client_code": transaction.client_code,
-            "flight_name": transaction.reys,
-            "delivery_method": delivery_method,
-            "photo_count": len(s3_keys),
-            "proof_id": proof.id,
-        },
-    )
+        # --- Update transaction (only if not already taken) ---
+        if not already_taken:
+            transaction.is_taken_away = True
+            transaction.taken_away_date = now
+            session.add(transaction)
 
-    await session.commit()
+        # --- Audit log ---
+        await AdminAuditLogDAO.log(
+            session=session,
+            action="WAREHOUSE_MARKED_TAKEN",
+            admin_id=admin.admin_id,
+            role_snapshot=admin.role_name,
+            details={
+                "transaction_id": transaction_id,
+                "client_code": transaction.client_code,
+                "flight_name": transaction.reys,
+                "delivery_method": delivery_method,
+                "photo_count": len(s3_keys),
+                "proof_id": proof.id,
+            },
+        )
+
+        await session.commit()
+    except Exception as exc:
+        _set_warehouse_error_context(
+            request,
+            operation="mark_cargo_taken",
+            admin=admin,
+            delivery_method=delivery_method,
+            transaction_ids=[transaction_id],
+            transactions=[transaction],
+            clients_by_code=clients_by_code,
+            comment=comment,
+            extra={
+                "photo_s3_keys": s3_keys,
+                "failed_stage": "proof_persist_or_commit",
+            },
+        )
+        logger.exception(
+            "Mark-taken proof persist failed: %s",
+            getattr(request.state, "error_context", None),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Yukni olib ketildi deb saqlashda DB xatoligi yuz berdi.",
+        ) from exc
 
     # --- Telegram notification (DB already committed) ---
-    client_obj = await ClientDAO.get_by_client_code(session, transaction.client_code)
     admin_label = await _resolve_warehouse_admin_label(session, admin)
     telegram_notified = await _send_taken_away_notification(
         transaction_id=transaction_id,
