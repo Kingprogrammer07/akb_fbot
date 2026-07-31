@@ -1,10 +1,12 @@
 """Broadcast message model."""
-from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, BigInteger, Text, DateTime, Boolean, Enum as SQLEnum
-from sqlalchemy.orm import Mapped, mapped_column
 import enum
+from datetime import datetime
+
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum as SQLEnum, Integer, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.database.models.base import Base
+from src.infrastructure.tools.datetime_utils import get_current_time
 
 
 class BroadcastStatus(str, enum.Enum):
@@ -133,20 +135,20 @@ class BroadcastMessage(Base):
 
     # Timing
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
+        DateTime(timezone=True),
+        default=get_current_time,
         nullable=False,
         comment="When broadcast was created"
     )
 
     started_at: Mapped[datetime | None] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=True,
         comment="When sending started"
     )
 
     completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=True,
         comment="When sending completed"
     )

@@ -2,7 +2,6 @@
 
 import asyncio
 import time
-from datetime import datetime, timezone
 
 from aiogram import Bot
 from aiogram.types import (
@@ -24,6 +23,7 @@ from src.infrastructure.database.dao.broadcast import BroadcastDAO
 from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.database.models.broadcast import BroadcastStatus
 from src.infrastructure.database.client import DatabaseClient
+from src.infrastructure.tools.datetime_utils import get_current_time
 from src.config import config
 
 
@@ -308,14 +308,14 @@ class BroadcastSender:
     async def _mark_started(self, session):
         """Mark broadcast as started."""
         broadcast = await BroadcastDAO.get_by_id(session, self.broadcast_id)
-        broadcast.started_at = datetime.now(timezone.utc)
+        broadcast.started_at = get_current_time()
         await session.commit()
     
     async def _mark_completed(self, session):
         """Mark broadcast as completed."""
         broadcast = await BroadcastDAO.get_by_id(session, self.broadcast_id)
         broadcast.status = BroadcastStatus.COMPLETED
-        broadcast.completed_at = datetime.now(timezone.utc)
+        broadcast.completed_at = get_current_time()
         await session.commit()
     
     async def _save_stats(self, session):
