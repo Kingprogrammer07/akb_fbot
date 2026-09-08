@@ -39,6 +39,9 @@ from src.infrastructure.database.models.partner_payment_method import (
     PartnerPaymentMethod,
     PartnerPaymentMethodType,
 )
+from src.infrastructure.database.models.partner_prefix_alias import (
+    PartnerPrefixAlias,
+)
 from src.infrastructure.database.models.partner_static_data import PartnerStaticData
 
 __all__ = [
@@ -78,6 +81,7 @@ __all__ = [
     # Partner masking models
     "Partner",
     "PartnerFlightAlias",
+    "PartnerPrefixAlias",
     "PartnerPaymentMethod",
     "PartnerPaymentMethodType",
     "PartnerStaticData",

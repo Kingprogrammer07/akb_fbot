@@ -20,6 +20,9 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.database.dao.partner import PartnerDAO
+from src.infrastructure.database.dao.partner_prefix_alias import (
+    PartnerPrefixAliasDAO,
+)
 from src.infrastructure.database.models.partner import Partner
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,7 @@ class PartnerResolver:
     """
 
     def __init__(self) -> None:
+        # Primary prefixes plus every ``partner_prefix_aliases`` row.
         self._by_prefix: dict[str, Partner] = {}
         self._by_code: dict[str, Partner] = {}
         # Prefixes sorted by length descending so longest-prefix-match
@@ -49,7 +53,31 @@ class PartnerResolver:
 
     async def _load(self, session: AsyncSession) -> None:
         partners = await PartnerDAO.get_all_active(session)
-        self._by_prefix = {p.prefix.upper(): p for p in partners}
+        by_prefix = {p.prefix.upper(): p for p in partners}
+        by_id = {p.id: p for p in partners}
+
+        # Extra prefixes owned by the same partners (``partner_prefix_aliases``).
+        # A primary prefix always wins: an alias duplicating one would make
+        # routing ambiguous, so it is ignored and reported instead of silently
+        # re-routing another partner's clients.
+        for alias in await PartnerPrefixAliasDAO.get_all_for_active_partners(session):
+            prefix = alias.prefix.upper()
+            partner = by_id.get(alias.partner_id)
+            if partner is None:
+                continue
+            clash = by_prefix.get(prefix)
+            if clash is not None:
+                logger.error(
+                    "PartnerResolver: prefix alias %r of partner %s ignored — "
+                    "already owned by partner %s",
+                    prefix,
+                    partner.code,
+                    clash.code,
+                )
+                continue
+            by_prefix[prefix] = partner
+
+        self._by_prefix = by_prefix
         self._by_code = {p.code.upper(): p for p in partners}
         self._prefixes_lpm = sorted(
             self._by_prefix.keys(), key=len, reverse=True

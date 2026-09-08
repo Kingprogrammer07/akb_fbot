@@ -37,7 +37,11 @@ class Partner(Base):
     """Human-readable name shown in admin UI and logs."""
 
     prefix: Mapped[str] = mapped_column(String(8), nullable=False, unique=True)
-    """``client_code`` prefix used for partner resolution.
+    """Primary ``client_code`` prefix used for partner resolution.
+
+    Additional prefixes owned by the same partner live in
+    ``partner_prefix_aliases`` (see :class:`PartnerPrefixAlias`) and are
+    resolved to this same partner.
 
     Single character for the standard partners (``A``, ``P``, …) but up
     to eight characters to accommodate multi-letter routes such as
@@ -87,6 +91,13 @@ class Partner(Base):
         cascade="all, delete-orphan",
         uselist=False,
         lazy="joined",
+    )
+
+    prefix_aliases = relationship(
+        "PartnerPrefixAlias",
+        back_populates="partner",
+        cascade="all, delete-orphan",
+        lazy="selectin",
     )
 
     def __repr__(self) -> str:

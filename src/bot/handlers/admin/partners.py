@@ -158,10 +158,20 @@ async def partner_open(
     psd = await PartnerStaticDataDAO.get_for_partner(session, partner.id)
     foto_preview = (psd.foto_hisobot if psd and psd.foto_hisobot else "—")[:200]
 
+    # ``Partner.prefix_aliases`` is selectin-loaded, so this needs no extra query.
+    extra_line = (
+        ", ".join(
+            html_module.escape(prefix)
+            for prefix in sorted(alias.prefix for alias in partner.prefix_aliases)
+        )
+        or "—"
+    )
+
     text = (
         f"⚙️ <b>{html_module.escape(partner.display_name)}</b> "
         f"(<code>{html_module.escape(partner.code)}</code>)\n\n"
         f"<b>Prefix:</b> <code>{html_module.escape(partner.prefix)}</code>\n"
+        f"<b>Qo'shimcha prefikslar:</b> <code>{extra_line}</code>\n"
         f"<b>DM partner:</b> {_yes_no(partner.is_dm_partner)}\n"
         f"<b>Guruh ID:</b> "
         f"<code>{partner.group_chat_id if partner.group_chat_id else '—'}</code>\n"
