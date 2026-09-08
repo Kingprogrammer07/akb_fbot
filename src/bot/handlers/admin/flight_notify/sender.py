@@ -105,6 +105,9 @@ class FlightNotifySender:
         # Per-client partner + display flight caches (populated in initialize)
         self._partner_for_client: dict[str, Partner] = {}
         self._display_flight_for_partner: dict[int, str] = {}
+        # Partners whose mask could not be created — their clients are skipped
+        # rather than notified with the real flight name.
+        self._mask_failed_partners: set[int] = set()
 
     async def initialize(self, progress_message_id: int) -> None:
         """Store the progress message ID and resolve the Google Sheets worksheet name.
@@ -129,6 +132,12 @@ class FlightNotifySender:
         # Resolve every client's partner and pre-load the per-partner mask
         # for this real flight.  Done once up-front so the per-message loop
         # never opens a DB session.
+        #
+        # ``ensure_mask`` (not ``real_to_mask``) is deliberate: this handler is
+        # not wired to the admin alias-review screen, so a partner that has
+        # never been bulk-sent would otherwise have no alias and every client
+        # would receive the REAL flight name.  Auto-generating the mask here
+        # mirrors what ``bulk_cargo_sender`` does via ``build_review``.
         async with DatabaseClient(config.database.database_url) as db:
             async with db.session_factory() as session:
                 resolver = get_resolver()
@@ -140,16 +149,43 @@ class FlightNotifySender:
                     except PartnerNotFoundError:
                         continue
                     self._partner_for_client[client.client_code] = partner
-                    if partner.id not in self._display_flight_for_partner:
-                        masked = await FlightMaskService.real_to_mask(
-                            session, partner.id, self.flight_name
+                    if (
+                        partner.id in self._display_flight_for_partner
+                        or partner.id in self._mask_failed_partners
+                    ):
+                        continue
+                    try:
+                        alias = await FlightMaskService.ensure_mask(
+                            session,
+                            partner_id=partner.id,
+                            partner_code=partner.code,
+                            real_flight_name=self.flight_name,
                         )
-                        self._display_flight_for_partner[partner.id] = (
-                            masked or self.flight_name
+                    except Exception:
+                        # Never fall back to the real flight name — that is the
+                        # leak this block exists to prevent.  Mark the partner so
+                        # its clients are reported as failures instead.
+                        self._mask_failed_partners.add(partner.id)
+                        logger.exception(
+                            "flight_notify: mask generation failed for partner %s "
+                            "on flight %s — its clients will be skipped",
+                            partner.code,
+                            self.flight_name,
                         )
+                        continue
+                    self._display_flight_for_partner[partner.id] = (
+                        alias.mask_flight_name
+                    )
+                await session.commit()
 
     def _display_flight_for(self, client: ClientNotifyData) -> str:
-        """Return the mask for *client* (real flight as fallback)."""
+        """Return the partner mask for *client*.
+
+        Falls back to the real flight name only for clients whose code matches
+        no partner prefix at all; every resolved partner is guaranteed a mask by
+        :meth:`initialize`, and partners whose mask could not be created are
+        skipped in :meth:`_process_client` before this is called.
+        """
         partner = self._partner_for_client.get(client.client_code)
         if partner is None:
             return self.flight_name
@@ -202,9 +238,23 @@ class FlightNotifySender:
                 client.client_code
             )
 
+        partner = self._partner_for_client.get(client.client_code)
+
+        # Mask generation failed for this partner — sending now would expose the
+        # real flight name, so the client is counted as a failure instead.
+        if partner is not None and partner.id in self._mask_failed_partners:
+            reason = f"{partner.code} uchun reys maskasi yaratilmadi"
+            self.stats.failed += 1
+            self.stats.errors.append((client.client_code, reason))
+            await self.channel_logger.log_failure(
+                flight_name=self.flight_name,
+                client_id=client.client_code,
+                error=reason,
+            )
+            return
+
         # Non-DM partners (Navo, Jon, Uztez, Habib, Jet, Oneway, GGX/Xorazm) →
         # forward to the partner's group regardless of telegram_id.
-        partner = self._partner_for_client.get(client.client_code)
         if partner is not None and not partner.is_dm_partner:
             await self._send_to_partner_group(partner, client)
             return
