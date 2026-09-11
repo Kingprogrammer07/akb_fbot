@@ -54,6 +54,37 @@ class AdminAccountDAO(BaseDAO[AdminAccount]):
         return result.scalar_one_or_none()
 
     @classmethod
+    async def get_id_by_telegram_id(
+        cls, session: AsyncSession, telegram_id: int
+    ) -> int | None:
+        """
+        Resolve a Telegram user ID to the AdminAccount primary key.
+
+        Bridges the two admin id namespaces: aiogram handlers only know the
+        Telegram id, while audit columns such as
+        ``client_payment_events.approved_by_admin_id`` store the AdminAccount PK.
+
+        An **inactive** admin account still resolves to its PK: deactivation
+        must not rewrite the attribution of actions the account is performing,
+        and access control is the caller's job — this method only resolves
+        identity.  ``None`` means something narrower: no ``admin_accounts`` row
+        exists for that Telegram user at all.
+
+        Only the id column is selected: callers need the PK, not the ORM object,
+        and this keeps the eager Role/Client loads off the hot path.
+        """
+        query = (
+            select(AdminAccount.id)
+            .join(Client, Client.id == AdminAccount.client_id)
+            .where(Client.telegram_id == telegram_id)
+        )
+        result = await session.execute(query)
+        # scalar_one_or_none: clients.telegram_id is UNIQUE and
+        # admin_accounts.client_id is UNIQUE, so more than one row would mean a
+        # broken invariant and should raise rather than silently pick one.
+        return result.scalar_one_or_none()
+
+    @classmethod
     async def get_by_id_with_relations(
         cls, session: AsyncSession, admin_id: int
     ) -> AdminAccount | None:

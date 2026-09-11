@@ -79,6 +79,13 @@ class PaymentService:
              (This absorbs the wallet deduction: sum(pbd) decreases by expected - cash_paid,
               which equals wallet_used when cash_paid covers the rest exactly)
 
+        Args:
+            admin_id: AdminAccount DB primary key of the admin booking the payment.
+                Written to ``client_payment_events.approved_by_admin_id``.  It must
+                come from a verified identity (``AdminJWTPayload.admin_id``), never
+                from a request body — see the column docstring on
+                :class:`ClientPaymentEvent`.
+
         Returns:
             Tuple of (transaction, payment_balance_difference, wallet_balance_before,
                       wallet_deducted, wallet_balance_after)
@@ -255,7 +262,10 @@ class PaymentService:
 
     @staticmethod
     async def process_unpaid_cargo_payment(
-        request: ProcessPaymentRequest, session: AsyncSession, translator: callable
+        request: ProcessPaymentRequest,
+        session: AsyncSession,
+        translator: callable,
+        admin_id: int,
     ) -> ProcessPaymentResponse:
         """
         Process payment for unpaid cargo (new transaction).
@@ -265,6 +275,10 @@ class PaymentService:
         For online/card payments: cargo remains not taken.
 
         REQUIRED: paid_amount must be provided in request.
+
+        Args:
+            admin_id: AdminAccount DB primary key of the authenticated cashier,
+                taken from the JWT by the router. Never read from ``request``.
         """
         # Get client
         client_service = ClientService()
@@ -330,7 +344,7 @@ class PaymentService:
                 cargo_id=request.cargo_id,
                 paid_amount=request.paid_amount,
                 payment_type=request.payment_type,
-                admin_id=request.admin_id,
+                admin_id=admin_id,
                 session=session,
                 expected_amount=expected_amount,
                 weight=weight,
@@ -357,7 +371,7 @@ class PaymentService:
                 flight=request.flight,
                 amount=request.paid_amount,
                 payment_type=request.payment_type,
-                admin_id=request.admin_id,
+                admin_id=admin_id,
                 is_cash=is_cash,
                 translator=translator,
                 wallet_deducted=wallet_deducted if request.use_balance else None,
@@ -408,12 +422,17 @@ class PaymentService:
         request: ProcessExistingTransactionPaymentRequest,
         session: AsyncSession,
         translator: callable,
+        admin_id: int,
     ) -> ProcessPaymentResponse:    # sourcery skip: low-code-quality
         """
         Process payment for existing transaction (partial payments).
 
         Wallet deduction is handled by adjusting payment_balance_difference
         directly on the existing transaction -- no WALLET_ADJ rows created.
+
+        Args:
+            admin_id: AdminAccount DB primary key of the authenticated cashier,
+                taken from the JWT by the router. Never read from ``request``.
         """
         # Get transaction
         transaction = await ClientTransactionDAO.get_by_id(
@@ -475,7 +494,7 @@ class PaymentService:
                     session=session,
                     transaction_id=transaction.id,
                     amount=request.paid_amount,
-                    approved_by_admin_id=request.admin_id,
+                    approved_by_admin_id=admin_id,
                     payment_provider=request.payment_type,
                 )
 
@@ -488,7 +507,7 @@ class PaymentService:
                     session=session,
                     transaction_id=transaction.id,
                     amount=wallet_deducted,
-                    approved_by_admin_id=request.admin_id,
+                    approved_by_admin_id=admin_id,
                     payment_provider="wallet",
                 )
 
@@ -545,7 +564,7 @@ class PaymentService:
                 flight=transaction.reys or "Unknown",
                 amount=request.paid_amount,
                 payment_type=request.payment_type,
-                admin_id=request.admin_id,
+                admin_id=admin_id,
                 is_cash=is_cash,
                 translator=translator,
                 wallet_deducted=wallet_deducted if request.use_balance else None,
@@ -741,7 +760,12 @@ class PaymentService:
         translator: callable,
         wallet_deducted: float = None,
     ) -> NotificationStatus:
-        """Send payment notifications to user and channel."""
+        """
+        Send payment notifications to user and channel.
+
+        ``admin_id`` is the AdminAccount DB primary key and is rendered in the
+        payment channel message, so it must always be the verified identity.
+        """
         status = NotificationStatus()
         telegram_id = client.telegram_id
 
@@ -831,7 +855,11 @@ class PaymentService:
                 f"📱 Telefon: {client.phone or 'N/A'}\n"
                 f"🆔 Telegram ID: {telegram_id or 'N/A'}\n"
                 f"🔢 Tranzaksiya: #{transaction_id}\n"
-                f"👨‍💼 Admin: #{admin_id}\n"
+                # Labelled "Admin ID" on purpose: this is the AdminAccount DB
+                # primary key. Before the id-namespace split this path emitted a
+                # Telegram id, so an unlabelled number would be read as the wrong
+                # identifier by anyone cross-referencing the channel.
+                f"👨‍💼 Admin ID: #{admin_id}\n"
                 f"🕐 Vaqt: {formatted_time}"
             )
 

@@ -45,15 +45,7 @@ class CardWithBalanceItem(BaseModel):
     payment_count: int
 
 
-# ============================================================================
-# Authorization
-# ============================================================================
-
-# Money-moving routes take the counter write scope; card lookups are read-only
-# cashier data. Both mirror the POS router that shares this prefix.
-_RequirePosProcess = Depends(require_permission("pos", "process"))
-_RequirePosRead = Depends(require_permission("pos", "read"))
-
+# =====================================================================
 # ============================================================================
 # Payment Processing Endpoints
 # ============================================================================
@@ -85,7 +77,12 @@ async def process_payment(
     - `flight`: Flight name
     - `payment_type`: 'cash', 'click', or 'payme'
     - `paid_amount`: Actual amount paid by client (REQUIRED, in UZS)
-    - `admin_id`: Admin's Telegram ID
+
+    **Authorization**: requires the `pos:process` permission. The approving
+    admin is read from the verified JWT (`AdminJWTPayload.admin_id`, an
+    AdminAccount DB primary key) and written to
+    `client_payment_events.approved_by_admin_id`; an `admin_id` in the body is
+    ignored.
 
     **Payment types**:
     - `cash`: Cash payment - cargo is automatically marked as taken
@@ -112,7 +109,8 @@ async def process_payment(
         return await PaymentService.process_unpaid_cargo_payment(
             request=request,
             session=session,
-            translator=_
+            translator=_,
+            admin_id=admin.admin_id,
         )
 
     except PaymentServiceError as e:
@@ -164,7 +162,9 @@ async def process_existing_payment(
     - `transaction_id`: Existing transaction ID
     - `payment_type`: 'cash', 'click', or 'payme'
     - `paid_amount`: Actual amount paid by client (REQUIRED, in UZS)
-    - `admin_id`: Admin's Telegram ID
+
+    **Authorization**: requires the `pos:process` permission. The approving
+    admin is read from the verified JWT, not from the body.
 
     Use this endpoint when:
     - A transaction exists but is only partially paid
@@ -188,7 +188,8 @@ async def process_existing_payment(
         return await PaymentService.process_existing_transaction_payment(
             request=request,
             session=session,
-            translator=_
+            translator=_,
+            admin_id=admin.admin_id,
         )
 
     except PaymentServiceError as e:
