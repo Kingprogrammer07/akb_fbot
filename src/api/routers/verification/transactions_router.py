@@ -1,4 +1,10 @@
-"""Transactions router for payment history and mark-as-taken endpoints."""
+"""Transactions router for payment history and mark-as-taken endpoints.
+
+Authentication: Admin JWT via the ``X-Admin-Authorization`` header.
+Authorization:  RBAC permissions on the ``cargo`` resource:
+  • cargo:read   — every read endpoint (list, detail, events, cargos, images)
+  • cargo:update — PATCH /transactions/{id}/status (mark cargo as taken)
+"""
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
@@ -31,21 +37,13 @@ router = APIRouter(prefix="/transactions", tags=["Transactions"])
 
 
 # ============================================================================
-# Permission Stub
+# Authorization
 # ============================================================================
 
-async def require_admin():
-    """
-    Stub for admin permission check.
-
-    Admin is identified by:
-    1. clients.role in ['admin', 'super-admin'] in database
-    2. telegram_id in config.telegram.admin_ids
-
-    For WebApp: Can use Telegram initData validation.
-    For now: stub that allows all requests.
-    """
-    pass
+# The read endpoints all project the same transaction/cargo aggregate, so they
+# share one scope; the mark-as-taken route below keeps the stricter
+# ``cargo:update`` it already required.
+_RequireCargoRead = Depends(require_permission("cargo", "read"))
 
 
 # ============================================================================
@@ -71,9 +69,9 @@ async def get_transactions(
     limit: int = Query(..., ge=1, le=100, description="Items per page (required)"),
     offset: int = Query(..., ge=0, description="Offset for pagination (required)"),
     flight_code: Optional[str] = Query(None, description="Filter by flight name (optional)"),
+    admin: AdminJWTPayload = _RequireCargoRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin),
 ) -> TransactionListResponse:
     """
     Get paginated list of transactions for a client.
@@ -147,9 +145,9 @@ async def get_transactions(
 )
 async def get_transaction_detail(
     transaction_id: int = Path(..., gt=0),
+    admin: AdminJWTPayload = _RequireCargoRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin),
 ) -> TransactionDetail:
     """
     Get detailed information about a specific transaction.
@@ -257,9 +255,9 @@ async def mark_transaction_taken(
 )
 async def get_transaction_events(
     transaction_id: int = Path(..., gt=0),
+    admin: AdminJWTPayload = _RequireCargoRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin),
 ) -> PaymentEventListResponse:
     """
     Get all payment events for a transaction.
@@ -296,9 +294,9 @@ async def get_transaction_events(
 )
 async def get_transaction_cargos(
     transaction_id: int = Path(..., gt=0),
+    admin: AdminJWTPayload = _RequireCargoRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin),
 ) -> CargoListResponse:
     """
     Get cargo items associated with a transaction.
@@ -325,9 +323,9 @@ async def get_transaction_cargos(
 async def get_transaction_cargo_images(
     transaction_id: int = Path(..., gt=0),
     type: Optional[Literal["unpaid"]] = Query(None),
+    admin: AdminJWTPayload = _RequireCargoRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin),
 ) -> TransactionCargoImagesResponse:
     """
     Get cargo images with resolved Telegram URLs.

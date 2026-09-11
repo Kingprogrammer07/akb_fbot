@@ -1,9 +1,21 @@
-"""Verification router for client search and info endpoints."""
+"""Verification router for client search and info endpoints.
+
+Authentication: Admin JWT via the ``X-Admin-Authorization`` header.
+Authorization:  every endpoint requires the ``clients:read`` RBAC permission —
+each one returns client profile data (passport, PINFL, region, address) or the
+cargo/flight records tied to a client, which is the same data surface guarded by
+``clients:read`` in ``admin_clients_router``.
+"""
 from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_db, get_translator
+from src.api.dependencies import (
+    AdminJWTPayload,
+    get_db,
+    get_translator,
+    require_permission,
+)
 from src.api.services.verification import VerificationService, CargoService
 from src.infrastructure.services.client import ClientService
 
@@ -22,23 +34,13 @@ router = APIRouter(prefix="/verification", tags=["Client Verification"])
 
 
 # ============================================================================
-# Permission Stub
+# Authorization
 # ============================================================================
 
-async def require_admin():
-    """
-    Stub for admin permission check.
-
-    Admin is identified by:
-    1. clients.role in ['admin', 'super-admin'] in database
-    2. telegram_id in config.telegram.admin_ids
-
-    For WebApp: Can use Telegram initData validation.
-    For now: stub that allows all requests.
-    """
-    # TODO: Implement actual admin authentication/authorization
-    # This should verify JWT token/initData and check admin role
-    pass
+# Shared across every route below: all of them read client-owned data, so a
+# single read scope keeps role assignment simple and matches the neighbouring
+# admin client endpoints.
+_RequireClientsRead = Depends(require_permission("clients", "read"))
 
 
 # ============================================================================
@@ -53,9 +55,9 @@ async def require_admin():
 )
 async def search_client(
     q: str = Query(..., min_length=1, description="Client code or phone number (required)"),
+    admin: AdminJWTPayload = _RequireClientsRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin)
 ) -> ClientSearchResponse:
     """
     Search for a client by code or phone number.
@@ -86,9 +88,9 @@ async def search_client(
 )
 async def get_client_info(
     client_code: str,
+    admin: AdminJWTPayload = _RequireClientsRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin)
 ) -> ClientFullInfoResponse:
     """
     Get full client information by client code (e.g. SS9999).
@@ -137,9 +139,9 @@ async def get_unpaid_cargo(
         ..., ge=0, description="Offset for pagination (required)"
     ),
     flight_code: Optional[str] = Query(None, description="Filter by flight name (optional)"),
+    admin: AdminJWTPayload = _RequireClientsRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin)
 ) -> UnpaidCargoListResponse:
     """
     Get paginated list of unpaid cargo for a client.
@@ -189,9 +191,9 @@ async def get_client_flights(
     include_database: bool = Query(
         True, description="Include flights from database"
     ),
+    admin: AdminJWTPayload = _RequireClientsRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin)
 ) -> FlightListResponse:
     """
     Get all flights for a client.
@@ -219,9 +221,9 @@ async def get_client_flights(
 )
 async def get_unpaid_cargo_flights(
     client_code: str,
+    admin: AdminJWTPayload = _RequireClientsRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin)
 ) -> FlightListResponse:
     """
     Get flights that have unpaid (sent but not paid) cargo for a client.
@@ -267,9 +269,9 @@ async def get_unpaid_cargo_flights(
 async def get_flight_payment_summary(
     client_code: str,
     flight_name: str,
+    admin: AdminJWTPayload = _RequireClientsRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin)
 ) -> FlightPaymentSummary:
     """
     Calculate payment summary for ALL cargos of a specific client in a specific flight.

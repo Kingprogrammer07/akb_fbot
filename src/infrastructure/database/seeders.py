@@ -161,6 +161,10 @@ _ROLE_DEFINITIONS: dict[str, dict] = {
             "pos:adjust",
             "pos:update_status",
             "auth:passkey",  # Face ID / hardware key for payment counter login
+            # Look up the client at the counter (/verification/*) and read the
+            # transaction history being settled (/transactions/*).
+            "clients:read",
+            "cargo:read",
         ],
     },
     "manager": {
@@ -173,6 +177,8 @@ _ROLE_DEFINITIONS: dict[str, dict] = {
             "clients:read",
             "clients:update",
             "clients:finance_read",
+            # Read the client's transaction list and detail (/transactions/*).
+            "cargo:read",
         ],
     },
     "warehouse": {
@@ -188,6 +194,11 @@ _ROLE_DEFINITIONS: dict[str, dict] = {
             "warehouse:read",
             # Mark cargo as taken-away with delivery proof photos
             "warehouse:mark_taken",
+            # Deliberately NOT granted cargo:read: that scope exposes the money
+            # fields on /transactions/{id} and its payment events, which this
+            # role's description explicitly rules out.  Everything a warehouse
+            # worker needs (client search, transaction search, cargo photos,
+            # mark-taken) is served by warehouse_router under warehouse:*.
         ],
     },
 }
