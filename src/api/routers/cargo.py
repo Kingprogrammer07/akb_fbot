@@ -10,6 +10,7 @@ from src.api.schemas.cargo import (
     ClientFlightSummary,
     ClientFlightDetailResponse
 )
+from src.api.utils.authz import assert_owns_client_code
 from src.infrastructure.services.cargo_item import CargoItemService
 from src.infrastructure.database.models.client import Client
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
@@ -17,28 +18,6 @@ from src.infrastructure.database.dao.client_transaction import ClientTransaction
 from src.bot.utils.google_sheets_checker import GoogleSheetsChecker
 
 router = APIRouter(prefix="/cargo", tags=["cargo"])
-
-
-def _assert_owns_client_code(current_user: Client, requested_code: str) -> None:
-    """Raise 403 if the authenticated user does not own the requested client code.
-
-    A user may legitimately have two codes (client_code and extra_code).
-    Both are checked so that either assignment grants access.
-
-    Why we raise here rather than silently returning empty data: returning an
-    empty response for someone else's valid code would leak existence information
-    ("this code has no cargo") while still being an authorization bypass.
-    """
-    user_codes = {
-        code.upper()
-        for code in (current_user.client_code, getattr(current_user, "extra_code", None))
-        if code
-    }
-    if not user_codes or requested_code.upper() not in user_codes:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: this cargo data does not belong to your account.",
-        )
 
 
 @router.get(
@@ -70,8 +49,12 @@ async def track_cargo(
     clean_track_code = track_code.strip().upper()
     
     # Service call
+    # Scoped to the caller's own codes: a track code alone must not expose
+    # another client's weight, payment state or dates.
     service = CargoItemService()
-    results = await service.search_by_track_code(clean_track_code, session)
+    results = await service.search_by_track_code(
+        clean_track_code, session, allowed_client_codes=set(current_user.active_codes)
+    )
     
     # Transform results to Pydantic models
     items = [CargoItemResponse(**item) for item in results['items']]
@@ -107,7 +90,7 @@ async def check_flight_status(
     """
     clean_flight = flight_name.strip().upper()
     clean_client = client_code.strip().upper()
-    _assert_owns_client_code(current_user, clean_client)
+    assert_owns_client_code(current_user, clean_client)
 
     # 1. Check Google Sheets
     sheets_checker = GoogleSheetsChecker(
@@ -200,7 +183,7 @@ async def get_client_flight_history(
     - last_update
     """
     clean_client = client_code.strip().upper()
-    _assert_owns_client_code(current_user, clean_client)
+    assert_owns_client_code(current_user, clean_client)
     service = CargoItemService()
 
     return await service.get_flight_summaries_for_client(clean_client, session)
@@ -228,7 +211,7 @@ async def get_flight_details(
     - Filters by client and flight
     """
     clean_client = client_code.strip().upper()
-    _assert_owns_client_code(current_user, clean_client)
+    assert_owns_client_code(current_user, clean_client)
     clean_flight = flight_name.strip()
     
     service = CargoItemService()
