@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_admin_from_jwt, get_db
+from src.api.dependencies import get_db, require_permission
 from src.api.schemas.statistics.analytics_stats import (
     AnalyticsEventPage,
     AnalyticsStatsResponse,
@@ -15,8 +15,8 @@ from src.api.services.statistics.analytics_stats_service import AnalyticsStatsSe
 router = APIRouter(
     prefix="/statistics/analytics",
     tags=["Statistics: Analytics"],
-    # Statistics are staff-only data.
-    dependencies=[Depends(get_admin_from_jwt)],
+    # Statistics are staff-only data, gated by statistics:read.
+    dependencies=[Depends(require_permission("statistics", "read"))],
 )
 
 

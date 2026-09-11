@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_db, get_admin_from_jwt
+from src.api.dependencies import get_db, require_permission
 
 from src.api.schemas.statistics.operational_stats import OperationalStatsResponse
 from src.api.services.statistics.operational_stats_service import (
@@ -14,8 +14,8 @@ from src.api.services.statistics.operational_stats_service import (
 router = APIRouter(
     prefix="/operational",
     tags=["Statistics - Operational"],
-    # Statistics are staff-only data.
-    dependencies=[Depends(get_admin_from_jwt)],
+    # Statistics are staff-only data, gated by statistics:read.
+    dependencies=[Depends(require_permission("statistics", "read"))],
 )
 
 

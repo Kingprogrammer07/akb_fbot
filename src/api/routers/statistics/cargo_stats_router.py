@@ -4,8 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_db
-from src.api.routers.admin_auth import get_admin_from_jwt
+from src.api.dependencies import get_db, require_permission
 from src.api.schemas.statistics.cargo_stats import CargoStatsResponse
 from src.infrastructure.database.dao.statistics.cargo_stats import CargoStatsDAO
 from src.api.services.statistics.cargo_stats_service import CargoStatsService
@@ -13,8 +12,8 @@ from src.api.services.statistics.cargo_stats_service import CargoStatsService
 router = APIRouter(
     prefix="/statistics/cargo",
     tags=["Statistics: Cargo"],
-    # Statistics are staff-only data.
-    dependencies=[Depends(get_admin_from_jwt)],
+    # Statistics are staff-only data, gated by statistics:read.
+    dependencies=[Depends(require_permission("statistics", "read"))],
 )
 
 

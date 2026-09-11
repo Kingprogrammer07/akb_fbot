@@ -1,16 +1,20 @@
-"""Statistics routes answer only staff, and every one of them runs for staff.
+"""Statistics routes answer only staff granted ``statistics:read``, and run for them.
 
 Every statistics router had its admin JWT dependency commented out, so client,
 financial, cargo, operational and analytics statistics - Excel exports of
-client lists included - answered any caller.  The region breakdowns behind
-/statistics/clients and /statistics/financial also always failed with a 500:
+client lists included - answered any caller.  A bare admin JWT check then still
+let every staff role - warehouse, worker and accountant included - download
+financial statistics and client exports with phone numbers, which those roles'
+descriptions rule out.  The region breakdowns behind /statistics/clients and
+/statistics/financial also always failed with a 500:
 ``HAVING region_code IS NOT NULL`` names a SELECT alias, which PostgreSQL
 rejects.
 
 The app mounts the real statistics routers with the prefix ``src/bot/bot.py``
 uses; only ``get_db`` and ``get_redis`` are overridden, to the test session and
 an in-memory Redis.  Staff authenticate with an admin JWT minted the way the
-admin login endpoint mints it.
+admin login endpoint mints it.  The permission catalogue and the default roles
+come from the startup seeders, and permissions go through the real RBAC path.
 """
 
 import secrets
@@ -24,6 +28,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import SESSION_PREFIX, SESSION_TTL_SECONDS, get_db, get_redis
@@ -39,8 +44,9 @@ from src.config import config
 from src.infrastructure.database.models.admin_account import AdminAccount
 from src.infrastructure.database.models.client import Client
 from src.infrastructure.database.models.client_transaction import ClientTransaction
-from src.infrastructure.database.models.role import Role
+from src.infrastructure.database.models.role import Permission, Role
 from src.infrastructure.database.models.static_data import StaticData
+from src.infrastructure.database.seeders import seed_permissions, seed_roles
 
 STATISTICS_ROUTERS = (
     clients_router,
@@ -66,6 +72,10 @@ STATISTICS_PATHS = [
 ]
 REGION_CODES = ("A07-15/1", "ABG12")
 """One Toshkent shahar code and one code of another region."""
+STATISTICS_READERS = ("analyst", "super-admin")
+"""A custom role granted statistics:read, and super-admin, which bypasses RBAC."""
+SEEDED_ROLES = ("accountant", "manager", "warehouse", "worker")
+"""The default roles ``seed_roles`` creates; none of them holds statistics:read."""
 
 
 @pytest.fixture
@@ -102,24 +112,36 @@ async def http_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 
 @pytest_asyncio.fixture
-async def staff_headers(db_session: AsyncSession) -> dict[str, str]:
-    """An admin JWT for a staff account whose role holds no special permission."""
-    account = AdminAccount(
-        client=Client(full_name="Statistika xodimi", telegram_id=6201),
-        role=Role(name="analyst"),
-        system_username="analyst",
-        pin_hash="unused-by-jwt-auth",
+async def staff(db_session: AsyncSession) -> dict[str, AdminAccount]:
+    """One staff account per role in STATISTICS_READERS and SEEDED_ROLES.
+
+    The analyst role is granted the seeded statistics:read row, the one a
+    super-admin picks in the role editor.
+    """
+    await seed_permissions(db_session)
+    await seed_roles(db_session)
+    statistics_read = await db_session.scalar(
+        select(Permission).where(
+            Permission.resource == "statistics", Permission.action == "read"
+        )
     )
-    db_session.add(account)
+    assert statistics_read is not None, "seed_permissions defines no statistics:read"
+    seeded = await db_session.scalars(select(Role).where(Role.name.in_(SEEDED_ROLES)))
+    roles = {role.name: role for role in seeded}
+    roles["analyst"] = Role(name="analyst", permissions=[statistics_read])
+    roles["super-admin"] = Role(name="super-admin")
+    accounts = {
+        name: AdminAccount(
+            client=Client(full_name=f"{name} xodim", telegram_id=6210 + number),
+            role=roles[name],
+            system_username=name,
+            pin_hash="unused-by-jwt-auth",
+        )
+        for number, name in enumerate(STATISTICS_READERS + SEEDED_ROLES)
+    }
+    db_session.add_all(accounts.values())
     await db_session.commit()
-    token, _ = create_admin_token(
-        admin_id=account.id,
-        role_name="analyst",
-        secret=config.api.JWT_SECRET.get_secret_value(),
-        algorithm=config.api.JWT_ALGORITHM,
-        expire_minutes=5,
-    )
-    return {"X-Admin-Authorization": f"Bearer {token}"}
+    return accounts
 
 
 @pytest_asyncio.fixture
@@ -140,6 +162,18 @@ async def client_headers(
         f"{SESSION_PREFIX}{token}", SESSION_TTL_SECONDS, str(client.id)
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def admin_headers(account: AdminAccount) -> dict[str, str]:
+    """An admin JWT for ``account``, minted the way the admin login endpoint does."""
+    token, _ = create_admin_token(
+        admin_id=account.id,
+        role_name=account.role.name,
+        secret=config.api.JWT_SECRET.get_secret_value(),
+        algorithm=config.api.JWT_ALGORITHM,
+        expire_minutes=5,
+    )
+    return {"X-Admin-Authorization": f"Bearer {token}"}
 
 
 async def seed_region_rows(session: AsyncSession) -> None:
@@ -194,16 +228,38 @@ async def test_statistics_refuse_callers_without_an_admin_jwt(
     assert answered == dict.fromkeys(answered, 401)
 
 
-async def test_staff_get_every_statistics_route_without_an_error(
+async def test_statistics_readers_get_every_route_without_an_error(
     http_client: AsyncClient,
     db_session: AsyncSession,
-    staff_headers: dict[str, str],
+    staff: dict[str, AdminAccount],
 ) -> None:
     await seed_region_rows(db_session)
 
     answered = {
-        path: (await http_client.get(path, headers=staff_headers)).status_code
+        (role, path): (
+            await http_client.get(path, headers=admin_headers(staff[role]))
+        ).status_code
+        for role in STATISTICS_READERS
         for path in STATISTICS_PATHS
     }
 
-    assert {path: code for path, code in answered.items() if code >= 400} == {}
+    assert {key: code for key, code in answered.items() if code >= 400} == {}
+
+
+async def test_staff_without_statistics_read_are_refused_every_route(
+    http_client: AsyncClient,
+    db_session: AsyncSession,
+    staff: dict[str, AdminAccount],
+) -> None:
+    # Seeded rows, so a wrongly admitted request answers 200 rather than failing.
+    await seed_region_rows(db_session)
+
+    answered = {
+        (role, path): (
+            await http_client.get(path, headers=admin_headers(staff[role]))
+        ).status_code
+        for role in SEEDED_ROLES
+        for path in STATISTICS_PATHS
+    }
+
+    assert answered == dict.fromkeys(answered, 403)

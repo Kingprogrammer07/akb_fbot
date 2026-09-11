@@ -78,6 +78,8 @@ _PERMISSION_DEFINITIONS: dict[str, list[str]] = {
     # partners:manage -> partner settings, payment methods, foto_hisobot,
     # and flight aliases.
     "partners":        ["manage"],
+    # statistics:read -> /statistics/* and /operational/* (dashboards and exports).
+    "statistics":      ["read"],
 }
 
 
