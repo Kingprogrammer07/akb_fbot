@@ -285,60 +285,15 @@ app.add_middleware(RequestLoggingMiddleware)
 async def _debug_validation_error(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Validation error handler.
+    """Log a client validation failure and return FastAPI's standard 422 body.
 
-    Logs full validation details but returns a sanitized payload to clients in production.
+    Logged at WARNING: a 422 is the client's mistake, and ERROR records are
+    forwarded to the Telegram log channel. The body keeps FastAPI's default
+    ``{"detail": [...]}`` shape because the web client renders ``loc``/``msg``.
     """
     import logging as _logging
-    import os as _os
 
-    logger = _logging.getLogger(__name__)
-
-    # Always log full validation details for debugging/observability
-    logger.error(
-        "422 RequestValidationError on %s %s — errors: %s",
-        request.method,
-        request.url.path,
-        exc.errors(),
-    )
-
-    # Gate detailed responses behind an environment flag
-    debug_validation = _os.getenv("DEBUG_VALIDATION_ERRORS", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-    if debug_validation:
-        # Useful for local/dev; mirrors FastAPI's default structure
-        return JSONResponse(
-            status_code=422,
-            content={"detail": exc.errors()},
-        )
-
-    # Sanitized, user-friendly error response for production
-    return JSONResponse(
-        status_code=422,
-        content={
-            "detail": [
-                {
-                    "code": "validation_error",
-                    "message": "One or more fields failed validation.",
-                }
-            ]
-        },
-    )
-
-
-@app.exception_handler(RequestValidationError)
-async def _debug_validation_error(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
-    """Temporary: log full validation errors to stdout for debugging."""
-    import logging as _logging
-
-    _logging.getLogger(__name__).error(
+    _logging.getLogger(__name__).warning(
         "422 RequestValidationError on %s %s — errors: %s",
         request.method,
         request.url.path,
