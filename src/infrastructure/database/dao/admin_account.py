@@ -130,6 +130,20 @@ class AdminAccountDAO(BaseDAO[AdminAccount]):
         return result.scalars().all()
 
     @classmethod
+    async def get_ids_by_role(
+        cls, session: AsyncSession, role_id: int
+    ) -> Sequence[int]:
+        """
+        IDs of every admin holding a role, without loading the rows.
+
+        Used to invalidate cached identities when the role itself changes, so
+        the admins affected are the only ones forced back to the database.
+        """
+        query = select(AdminAccount.id).where(AdminAccount.role_id == role_id)
+        result = await session.execute(query)
+        return result.scalars().all()
+
+    @classmethod
     async def get_all_admins(
         cls,
         session: AsyncSession,
