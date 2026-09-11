@@ -16,7 +16,8 @@ from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.utils.decorators import handle_errors
 from src.bot.utils.google_sheets_checker import GoogleSheetsChecker
 from src.infrastructure.database.dao import ClientTransactionDAO
-from src.infrastructure.services import ClientService, FlightMaskService
+from src.infrastructure.services import ClientService
+from src.infrastructure.services.flight_display import FlightDisplay
 from src.infrastructure.database.dao.delivery_request import DeliveryRequestDAO
 from src.config import config, BASE_DIR
 import math
@@ -26,13 +27,19 @@ special_regions = ["Qoraqalpog'iston", "Surxondaryo", "Xorazm"]
 delivery_request_router = Router(name="delivery_request")
 
 
-async def _mask_flight_names(session: AsyncSession, flights: list[str]) -> list[str]:
-    """Return masked flight names for user display (partner_id=1)."""
-    result = []
-    for f in flights:
-        m = await FlightMaskService.real_to_mask(session, 1, f)
-        result.append(m or f)
-    return result
+async def _mask_flight_names(
+    session: AsyncSession, client, flights: list[str]
+) -> list[str]:
+    """Return the labels *this* client may see for ``flights``.
+
+    Resolves the client's own partner; a flight with no mask degrades to an
+    ordinal placeholder so the real flight name is never rendered.
+    """
+    display = await FlightDisplay.for_client(session, client.active_codes)
+    return [
+        await display.label(session, f, ordinal=i)
+        for i, f in enumerate(flights, start=1)
+    ]
 
 
 def calculate_price(total_weight: float, region: str) -> int:
@@ -330,7 +337,15 @@ async def profile_confirmation_yes(
             seen_keys.add(key)
             candidate_flight_names.append(fn)
 
-    from src.infrastructure.services.flight_mask import FlightMaskService
+    # Button text is masked; no mask -> ordinal placeholder.
+    #
+    # ``callback_data`` still carries the real flight name.  That is NOT safe
+    # by construction: reply_markup is delivered to the client along with the
+    # message, so a non-official client can read it.  Pre-existing across
+    # every flight keyboard in the bot (see also make_payment.py, info.py);
+    # fixing it means keying callbacks by an opaque id, which is a separate
+    # change.
+    display = await FlightDisplay.for_client(session, client.active_codes)
 
     paid_flights = []
     for flight_name in candidate_flight_names:
@@ -339,10 +354,11 @@ async def profile_confirmation_yes(
         )
 
         if is_paid:
-            display_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
             paid_flights.append({
                 "flight_name": flight_name,
-                "display_name": display_name or flight_name,
+                "display_name": await display.label(
+                    session, flight_name, ordinal=len(paid_flights) + 1
+                ),
             })
 
     # If no paid flights, inform user
@@ -420,9 +436,13 @@ async def process_flight_selection(
     await callback.answer()
 
 
-async def _check_rate_limit_bot(session: AsyncSession, client_id: int, requesting_flights: list[str]) -> str | None:
-    """Check if the user requested any of these flights within the last hour. Returns error message if so."""
-    recent_requests = await DeliveryRequestDAO.get_recent_requests_by_client(session, client_id, hours=1)
+async def _check_rate_limit_bot(session: AsyncSession, client, requesting_flights: list[str]) -> str | None:
+    """Check if the user requested any of these flights within the last hour. Returns error message if so.
+
+    Takes the whole client because the message names the offending flights,
+    and naming them safely needs the client's partner.
+    """
+    recent_requests = await DeliveryRequestDAO.get_recent_requests_by_client(session, client.id, hours=1)
 
     for req in recent_requests:
         if not req.flight_names:
@@ -431,7 +451,7 @@ async def _check_rate_limit_bot(session: AsyncSession, client_id: int, requestin
             req_flights = json.loads(req.flight_names)
             overlap = set(requesting_flights).intersection(set(req_flights))
             if overlap:
-                masked = await _mask_flight_names(session, list(overlap))
+                masked = await _mask_flight_names(session, client, sorted(overlap))
                 return f"Siz {', '.join(masked)} reys(lar)i uchun so'nggi 1 soat ichida zayavka yuborgansiz. Iltimos biroz kuting."
         except json.JSONDecodeError:
             pass
@@ -465,7 +485,7 @@ async def process_flight_selection_done(
     # Get client
     client = await client_service.get_client(callback.from_user.id, session)
     
-    rate_limit_error = await _check_rate_limit_bot(session, client.id, selected_flights)
+    rate_limit_error = await _check_rate_limit_bot(session, client, selected_flights)
     if rate_limit_error:
         await callback.answer(rate_limit_error, show_alert=True)
         return
@@ -474,7 +494,7 @@ async def process_flight_selection_done(
     if delivery_type == "uzpost":
         # Calculate total weight for UZPOST delivery
         total_weight = 0
-        display_flights = await _mask_flight_names(session, selected_flights)
+        display_flights = await _mask_flight_names(session, client, selected_flights)
 
         for flight_name in selected_flights:
             # Calculate total weight for each flight
@@ -712,7 +732,7 @@ async def uzpost_toggle_wallet(
         final_payable_amount=final_payable_amount,
     )
 
-    display_flights = await _mask_flight_names(session, selected_flights)
+    display_flights = await _mask_flight_names(session, client, selected_flights)
 
     # Get payment card info
     from src.infrastructure.services import PaymentCardService

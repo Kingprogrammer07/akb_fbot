@@ -16,6 +16,10 @@ from src.bot.utils.decorators import handle_errors
 from src.bot.utils.sheets_cache import get_client_sheets_data
 from src.bot.utils.currency_cache import convert_to_uzs
 from src.infrastructure.services import ClientService
+from src.infrastructure.services.flight_display import (
+    FlightDisplay,
+    flight_label_for_client,
+)
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
 from src.infrastructure.database.dao.static_data import StaticDataDAO
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
@@ -38,20 +42,28 @@ async def _safe_answer(callback: CallbackQuery, text: str = "", show_alert: bool
     await safe_answer_callback(callback, text, show_alert)
 
 
-def _build_flight_keyboard(
+async def _build_flight_keyboard(
+    session: AsyncSession,
+    client,
     matches: list[dict],
     payment_map: dict,
     _: callable,
 ) -> InlineKeyboardBuilder:
-    """Build the flights list inline keyboard."""
+    """Build the flights list inline keyboard.
+
+    Button labels show the partner mask (ordinal placeholder when the flight
+    has no alias yet); the real name is never rendered.
+    """
+    display = await FlightDisplay.for_client(session, client.active_codes)
     builder = InlineKeyboardBuilder()
-    for match in matches:
+    for position, match in enumerate(matches, start=1):
         flight_name = match["flight_name"]
+        label = await display.label(session, flight_name, ordinal=position)
         payment_data = payment_map.get(flight_name)
         if payment_data:
-            button_text = f"✈️ {flight_name} - {payment_data['total_payment']:,.2f} so'm"
+            button_text = f"✈️ {label} - {payment_data['total_payment']:,.2f} so'm"
         else:
-            button_text = f"✈️ {flight_name} - {_('info-report-not-sent')}"
+            button_text = f"✈️ {label} - {_('info-report-not-sent')}"
         builder.button(
             text=button_text,
             callback_data=f"info_flight:{flight_name}:{match['row_number']}",
@@ -218,7 +230,9 @@ async def info_handler(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    builder     = await _build_flight_keyboard(
+        session, client, result["matches"], payment_map, _
+    )
 
     await message.answer(_("info-flights-list"), reply_markup=builder.as_markup())
 
@@ -247,6 +261,12 @@ async def flight_details_handler(
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
 
+    # Everything rendered below shows the partner mask; the real flight name
+    # stays server-side (it remains the DAO lookup key).
+    display_flight = await flight_label_for_client(
+        session, client.active_codes, flight_name
+    )
+
     payment_data = await calculate_flight_payment(
         session, flight_name, client.active_codes, redis
     )
@@ -262,7 +282,7 @@ async def flight_details_handler(
         await callback.message.edit_text(
             _(
                 "info-report-not-sent-message",
-                flight_name=flight_name,
+                flight_name=display_flight,
                 client_code=client.primary_code,
                 track_codes=_("admin-leftover-column-track-code") + ": " + track_info,
             ),
@@ -308,7 +328,7 @@ async def flight_details_handler(
         details_text = _(
             "info-flight-details-partial",
             client_code=client.primary_code,
-            worksheet=flight_name,
+            worksheet=display_flight,
             total=f"{total_amount:,.2f}",
             paid=f"{paid_amount:,.2f}",
             remaining=f"{remaining_amount:,.2f}",
@@ -320,7 +340,7 @@ async def flight_details_handler(
         details_text = _(
             "info-flight-details-with-status",
             client_code=client.primary_code,
-            worksheet=flight_name,
+            worksheet=display_flight,
             summa=f"{payment_data['total_payment']:,.2f}",
             vazn=f"{payment_data['total_weight']:.2f}",
             trek_kodlari=trek_kodlari_text,
@@ -369,7 +389,9 @@ async def back_to_flights_callback(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    builder     = await _build_flight_keyboard(
+        session, client, result["matches"], payment_map, _
+    )
 
     await callback.message.edit_text(_("info-flights-list"), reply_markup=builder.as_markup())
     await _safe_answer(callback)
@@ -398,7 +420,9 @@ async def refresh_info_flights_callback(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    builder     = await _build_flight_keyboard(
+        session, client, result["matches"], payment_map, _
+    )
 
     try:
         await callback.message.delete()
@@ -440,6 +464,11 @@ async def view_cargo_photos_handler(
         await _safe_answer(callback, _("info-no-cargo-photos"), show_alert=True)
         return
 
+    # Summary message shows the mask, never the real flight name.
+    display_flight = await flight_label_for_client(
+        session, client.active_codes, flight_name
+    )
+
     await _safe_answer(callback)
 
     total_sent = 0
@@ -473,7 +502,7 @@ async def view_cargo_photos_handler(
         _(
             "info-cargo-photos-summary",
             total=total_sent,
-            flight_name=flight_name,
+            flight_name=display_flight,
             client_code=client.primary_code,
         )
     )

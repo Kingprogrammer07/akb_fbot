@@ -16,11 +16,11 @@ from src.api.services.verification.utils import (
     get_extra_charge,
     parse_photo_file_ids,
 )
-from src.infrastructure.services.flight_mask import FlightMaskService
-from src.infrastructure.services.partner_resolver import (
-    PartnerNotFoundError,
-    get_resolver,
+from src.infrastructure.services.flight_display import (
+    FlightDisplay,
+    resolve_partner_for_codes,
 )
+from src.infrastructure.services.flight_mask import FlightMaskService
 from src.infrastructure.tools.s3_manager import s3_manager
 
 logger = logging.getLogger(__name__)
@@ -82,13 +82,9 @@ class ReportService:
     async def _resolve_partner(self, session: AsyncSession, client_code: str):
         """Best-effort partner lookup for masking; returns ``None`` on miss."""
         client = await ClientDAO.get_by_client_code(session, client_code)
-        codes_to_try = client.active_codes if client else [client_code]
-        for code in codes_to_try:
-            try:
-                return await get_resolver().resolve_by_client_code(session, code)
-            except PartnerNotFoundError:
-                continue
-        return None
+        return await resolve_partner_for_codes(
+            session, client.active_codes if client else client_code
+        )
 
     async def _mask_flights(
         self,
@@ -96,15 +92,18 @@ class ReportService:
         client_code: str,
         real_flights: list[str],
     ) -> list[str]:
-        """Translate each real flight name to its partner-specific mask."""
-        partner = await self._resolve_partner(session, client_code)
-        if partner is None or not real_flights:
+        """Translate each real flight name to its partner-specific mask.
+
+        A flight with no resolvable mask degrades to an ordinal placeholder
+        rather than to the real name.
+        """
+        if not real_flights:
             return real_flights
-        out: list[str] = []
-        for real in real_flights:
-            masked = await FlightMaskService.real_to_mask(session, partner.id, real)
-            out.append(masked or real)
-        return out
+        display = FlightDisplay(await self._resolve_partner(session, client_code))
+        return [
+            await display.label(session, real, ordinal=i)
+            for i, real in enumerate(real_flights, start=1)
+        ]
 
     async def _normalize_flight_input(
         self, session: AsyncSession, client_code: str, flight_query: str | None
@@ -177,21 +176,12 @@ class ReportService:
         enriched = await asyncio.gather(*tasks)
 
         # Replace real flight names with masks before returning to the API.
-        partner = await self._resolve_partner(session, client_code)
-        if partner is not None:
-            cache: dict[str, str] = {}
-            for item in enriched:
-                real = item.get("flight_name")
-                if not real:
-                    continue
-                if real in cache:
-                    item["flight_name"] = cache[real]
-                    continue
-                masked = await FlightMaskService.real_to_mask(
-                    session, partner.id, real
-                )
-                cache[real] = masked or real
-                item["flight_name"] = cache[real]
+        # No mask -> placeholder; the real name never reaches the response.
+        display = FlightDisplay(await self._resolve_partner(session, client_code))
+        for item in enriched:
+            if not item.get("flight_name"):
+                continue
+            item["flight_name"] = await display.label(session, item["flight_name"])
         return enriched
 
     async def _enrich_record(

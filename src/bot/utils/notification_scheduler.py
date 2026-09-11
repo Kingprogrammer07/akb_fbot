@@ -14,6 +14,7 @@ from src.infrastructure.database.models.client_transaction import ClientTransact
 from src.infrastructure.database.models.flight_cargo import FlightCargo
 from src.infrastructure.database.models.cargo_item import CargoItem
 from src.bot.utils.i18n import i18n, get_user_language
+from src.infrastructure.services.flight_display import FlightDisplay
 from src.config import config
 from src.infrastructure.database.dao.notification import NotificationDAO
 
@@ -213,10 +214,15 @@ async def send_partial_payment_reminders(bot: Bot):
                             
                             # Build message for all transactions
                             message_parts = []
-                            
+
+                            # Partner mask only - these reminders go straight to the client,
+                            # so the real flight name must not appear in them.
+                            display = await FlightDisplay.for_client(session, client.active_codes)
+
                             for item in transactions:
                                 tx = item['tx']
                                 days = item['days_remaining']
+                                display_flight = await display.label(session, tx.reys)
                                 
                                 total = float(tx.total_amount) if tx.total_amount else float(tx.summa or 0)
                                 paid = float(tx.paid_amount) if tx.paid_amount else 0.0
@@ -225,7 +231,7 @@ async def send_partial_payment_reminders(bot: Bot):
                                 
                                 if days == 0:
                                     reminder_text = i18n.get(language, "reminder-partial-deadline-today",
-                                        flight=tx.reys,
+                                        flight=display_flight,
                                         total=f"{total:,.0f}",
                                         paid=f"{paid:,.0f}",
                                         remaining=f"{remaining:,.0f}",
@@ -233,7 +239,7 @@ async def send_partial_payment_reminders(bot: Bot):
                                     )
                                 elif days == 2:
                                     reminder_text = i18n.get(language, "reminder-partial-deadline-2days",
-                                        flight=tx.reys,
+                                        flight=display_flight,
                                         total=f"{total:,.0f}",
                                         paid=f"{paid:,.0f}",
                                         remaining=f"{remaining:,.0f}",
@@ -242,7 +248,7 @@ async def send_partial_payment_reminders(bot: Bot):
                                     )
                                 else:  # 5 days
                                     reminder_text = i18n.get(language, "reminder-partial-deadline-5days",
-                                        flight=tx.reys,
+                                        flight=display_flight,
                                         total=f"{total:,.0f}",
                                         paid=f"{paid:,.0f}",
                                         remaining=f"{remaining:,.0f}",
