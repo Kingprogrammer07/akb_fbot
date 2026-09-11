@@ -9,6 +9,7 @@ from src.bot.filters.is_private_chat import IsPrivate
 from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.states.user_track_check import UserTrackCheckStates
 from src.infrastructure.database.dao.client import ClientDAO
+from src.infrastructure.database.models.client import Client
 from src.infrastructure.services.cargo_item import CargoItemService
 from src.infrastructure.services.flight_mask import FlightMaskService
 from src.infrastructure.services.partner_resolver import (
@@ -78,8 +79,28 @@ async def process_track_code(
 
     track_code = message.text.strip().upper()
 
-    # 3. Qidiruv
-    results = await cargo_service.search_by_track_code(track_code, session)
+    # 3. Qidiruv — faqat foydalanuvchining O'Z kodlari bo'yicha.
+    # Track kod pochtani ushlagan har kimga ko'rinadi, shuning uchun scope'siz
+    # qidiruv boshqa mijozning og'irligi/to'lovi/sanalarini ochib yuboradi.
+    client = await ClientDAO.get_by_telegram_id(session, message.from_user.id)
+    if not client:
+        logger.warning(
+            "Track code search without a client row (telegram_id=%s)",
+            message.from_user.id,
+        )
+        await safe_execute(
+            message.answer,
+            _("user-track-check-not-found", track_code=track_code)
+            + "\n\n"
+            + _("user-track-check-search-again"),
+            reply_markup=cancel_kyb(_)
+        )
+        return
+
+    allowed_codes = set(client.active_codes)
+    results = await cargo_service.search_by_track_code(
+        track_code, session, allowed_client_codes=allowed_codes
+    )
 
     # 4. Topilmasa
     if not results['found']:
@@ -125,7 +146,7 @@ async def process_track_code(
     # own partner (no leakage of the underlying real flight code).
     await _apply_flight_mask(
         session,
-        message.from_user.id,
+        client,
         items_in_uzbekistan + items_in_china,
     )
 
@@ -182,7 +203,7 @@ async def process_track_code(
 
 async def _apply_flight_mask(
     session: AsyncSession,
-    telegram_id: int,
+    client: Client,
     items: list[dict],
 ) -> None:
     """Mutate ``items`` in place, replacing ``flight_name`` with the partner mask.
@@ -193,10 +214,7 @@ async def _apply_flight_mask(
     """
     if not items:
         return
-    client = await ClientDAO.get_by_telegram_id(session, telegram_id)
-    primary_code = (
-        client.primary_code if client and client.primary_code else None
-    )
+    primary_code = client.primary_code
     if not primary_code:
         return
     try:

@@ -163,11 +163,39 @@ class CargoItemService:
 
         return merged_items
 
-    async def search_by_track_code(self, track_code: str, session: AsyncSession) -> dict:
+    async def search_by_track_code(
+        self,
+        track_code: str,
+        session: AsyncSession,
+        allowed_client_codes: set[str] | None = None,
+    ) -> dict:
+        """Look up cargo items by track code.
+
+        Args:
+            track_code: Track code to search for.
+            session: Database session.
+            allowed_client_codes: When given, only items whose ``client_id`` is
+                one of these codes are returned; anything else reports as not
+                found. Callers acting on behalf of an end user MUST pass the
+                caller's own ``Client.active_codes`` — track codes are visible
+                to whoever handles the parcel, so an unscoped lookup exposes
+                another client's weight, payment state and dates. ``None``
+                means unrestricted and is reserved for admin tooling.
+
+        Returns:
+            Dict with ``found``, ``items`` (merged/enriched) and ``total_count``.
+        """
         all_items = await CargoItemDAO.get_by_track_code(session, track_code)
+        if allowed_client_codes is not None:
+            # Items with no client_id cannot be attributed to the caller, so
+            # they stay hidden rather than being shown to everyone.
+            all_items = [
+                item for item in all_items
+                if item.client_id and item.client_id.upper() in allowed_client_codes
+            ]
         if not all_items:
             return {'found': False, 'items': [], 'total_count': 0}
-        
+
         # Take client_id and flight_name from the first item to fetch flight_cargos context
         client_id = all_items[0].client_id
         flight_name = all_items[0].flight_name
