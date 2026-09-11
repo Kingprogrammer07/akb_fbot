@@ -18,11 +18,17 @@ def assert_owns_client_code(current_user: Client, requested_code: str) -> None:
     under whichever alias the scan tooling knew at the time, so all of them
     have to grant access.
 
+    Both sides are trimmed before comparing: ``active_codes`` only uppercases,
+    and a stored code can carry stray padding that the web app echoes back
+    from the profile endpoint. Blank codes never match, so a whitespace-only
+    alias cannot make an empty request pass.
+
     Why raise rather than silently return empty data: an empty response for
     someone else's valid code would still leak existence information ("this
     code has no cargo") while remaining an authorization bypass.
     """
-    if (requested_code or "").strip().upper() not in set(current_user.active_codes):
+    owned_codes = {code.strip().upper() for code in current_user.active_codes} - {""}
+    if (requested_code or "").strip().upper() not in owned_codes:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: this data does not belong to your account.",

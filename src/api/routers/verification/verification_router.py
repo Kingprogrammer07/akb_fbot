@@ -6,8 +6,8 @@ each one returns client profile data (passport, PINFL, region, address) or the
 cargo/flight records tied to a client, which is the same data surface guarded by
 ``clients:read`` in ``admin_clients_router``.
 """
-from typing import Optional, Literal
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import Annotated, Optional, Literal
+from fastapi import APIRouter, Depends, HTTPException, Path, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import (
@@ -30,6 +30,12 @@ from src.api.schemas.verification import (
 )
 from src.infrastructure.database.dao import ClientTransactionDAO
 
+# Client codes contain "/" (A01-1/1, A80/1) and the admin panel sends them
+# unencoded, so every route captures the code as a ``path`` segment, like
+# routers/reports.py.  A path segment also matches "/" and Starlette takes the
+# first matching route, so a route is declared before any other route whose
+# pattern would swallow its URL: ``.../cargo/unpaid/flights`` before
+# ``.../flights``, and the bare ``/{client_code:path}`` last of all.
 router = APIRouter(prefix="/verification", tags=["Client Verification"])
 
 
@@ -41,6 +47,10 @@ router = APIRouter(prefix="/verification", tags=["Client Verification"])
 # single read scope keeps role assignment simple and matches the neighbouring
 # admin client endpoints.
 _RequireClientsRead = Depends(require_permission("clients", "read"))
+
+# A ``path`` segment also matches an empty string, and no client has an empty
+# code, so such a request is rejected before it reaches a handler.
+ClientCodePath = Annotated[str, Path(pattern=r"\S")]
 
 
 # ============================================================================
@@ -80,52 +90,18 @@ async def search_client(
     return ClientSearchResponse(client=result)
 
 
-@router.get(
-    "/{client_code}",
-    response_model=ClientFullInfoResponse,
-    summary="Get full client information",
-    description="Get detailed client information including passport, referrals, and latest transaction."
-)
-async def get_client_info(
-    client_code: str,
-    admin: AdminJWTPayload = _RequireClientsRead,
-    session: AsyncSession = Depends(get_db),
-    _: callable = Depends(get_translator),
-) -> ClientFullInfoResponse:
-    """
-    Get full client information by client code (e.g. SS9999).
-
-    Returns:
-    - Profile details (passport, PINFL, region, address)
-    - role check status
-    - Referral count
-    - Extra passports count
-    - Passport image file IDs
-    - Transaction count and latest transaction
-    """
-    result = await VerificationService.get_client_full_info(client_code.upper(), session)
-
-    if not result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=_("client-not-found")
-        )
-
-    return ClientFullInfoResponse(client=result)
-
-
 # ============================================================================
 # Unpaid Cargo Endpoints
 # ============================================================================
 
 @router.get(
-    "/{client_code}/cargo/unpaid",
+    "/{client_code:path}/cargo/unpaid",
     response_model=UnpaidCargoListResponse,
     summary="Get unpaid cargo items",
     description="Get list of unpaid cargo items for a client. ALL FILTER PARAMETERS ARE REQUIRED."
 )
 async def get_unpaid_cargo(
-    client_code: str,
+    client_code: ClientCodePath,
     filter_type: Literal["all", "pending"] = Query(
         ..., description="Filter type (required): 'all' or 'pending'"
     ),
@@ -178,49 +154,13 @@ async def get_unpaid_cargo(
 # ============================================================================
 
 @router.get(
-    "/{client_code}/flights",
-    response_model=FlightListResponse,
-    summary="Get client flights",
-    description="Get all flights associated with a client. FILTER PARAMETERS ARE REQUIRED."
-)
-async def get_client_flights(
-    client_code: str,
-    include_sheets: bool = Query(
-        True, description="Include flights from Google Sheets"
-    ),
-    include_database: bool = Query(
-        True, description="Include flights from database"
-    ),
-    admin: AdminJWTPayload = _RequireClientsRead,
-    session: AsyncSession = Depends(get_db),
-    _: callable = Depends(get_translator),
-) -> FlightListResponse:
-    """
-    Get all flights for a client.
-
-    **FILTER PARAMETERS ARE REQUIRED** - must explicitly specify sources.
-
-    Combines flights from:
-    - Database transactions (paid cargo) - if include_database=true
-    - Database flight_cargo (sent cargo) - if include_database=true
-    - Google Sheets - if include_sheets=true
-    """
-    return await VerificationService.get_client_flights(
-        client_code=client_code.upper(),
-        session=session,
-        include_sheets=include_sheets,
-        include_database=include_database
-    )
-
-
-@router.get(
-    "/{client_code}/cargo/unpaid/flights",
+    "/{client_code:path}/cargo/unpaid/flights",
     response_model=FlightListResponse,
     summary="Get flights with unpaid cargo",
     description="Get list of flights that have unpaid cargo for a client."
 )
 async def get_unpaid_cargo_flights(
-    client_code: str,
+    client_code: ClientCodePath,
     admin: AdminJWTPayload = _RequireClientsRead,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
@@ -256,18 +196,54 @@ async def get_unpaid_cargo_flights(
     )
 
 
+@router.get(
+    "/{client_code:path}/flights",
+    response_model=FlightListResponse,
+    summary="Get client flights",
+    description="Get all flights associated with a client. FILTER PARAMETERS ARE REQUIRED."
+)
+async def get_client_flights(
+    client_code: ClientCodePath,
+    include_sheets: bool = Query(
+        True, description="Include flights from Google Sheets"
+    ),
+    include_database: bool = Query(
+        True, description="Include flights from database"
+    ),
+    admin: AdminJWTPayload = _RequireClientsRead,
+    session: AsyncSession = Depends(get_db),
+    _: callable = Depends(get_translator),
+) -> FlightListResponse:
+    """
+    Get all flights for a client.
+
+    **FILTER PARAMETERS ARE REQUIRED** - must explicitly specify sources.
+
+    Combines flights from:
+    - Database transactions (paid cargo) - if include_database=true
+    - Database flight_cargo (sent cargo) - if include_database=true
+    - Google Sheets - if include_sheets=true
+    """
+    return await VerificationService.get_client_flights(
+        client_code=client_code.upper(),
+        session=session,
+        include_sheets=include_sheets,
+        include_database=include_database
+    )
+
+
 # ============================================================================
 # Flight Payment Summary Endpoint
 # ============================================================================
 
 @router.get(
-    "/{client_code}/flights/{flight_name}/payment-summary",
+    "/{client_code:path}/flights/{flight_name}/payment-summary",
     response_model=FlightPaymentSummary,
     summary="Get flight payment summary",
     description="Calculate payment summary for all cargos of a client in a specific flight."
 )
 async def get_flight_payment_summary(
-    client_code: str,
+    client_code: ClientCodePath,
     flight_name: str,
     admin: AdminJWTPayload = _RequireClientsRead,
     session: AsyncSession = Depends(get_db),
@@ -303,3 +279,42 @@ async def get_flight_payment_summary(
         )
 
     return result
+
+
+# ============================================================================
+# Client Info Endpoint
+# ============================================================================
+
+# Must stay the last route: see the routing note above ``router``.
+@router.get(
+    "/{client_code:path}",
+    response_model=ClientFullInfoResponse,
+    summary="Get full client information",
+    description="Get detailed client information including passport, referrals, and latest transaction."
+)
+async def get_client_info(
+    client_code: ClientCodePath,
+    admin: AdminJWTPayload = _RequireClientsRead,
+    session: AsyncSession = Depends(get_db),
+    _: callable = Depends(get_translator),
+) -> ClientFullInfoResponse:
+    """
+    Get full client information by client code (e.g. SS9999).
+
+    Returns:
+    - Profile details (passport, PINFL, region, address)
+    - role check status
+    - Referral count
+    - Extra passports count
+    - Passport image file IDs
+    - Transaction count and latest transaction
+    """
+    result = await VerificationService.get_client_full_info(client_code.upper(), session)
+
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_("client-not-found")
+        )
+
+    return ClientFullInfoResponse(client=result)
