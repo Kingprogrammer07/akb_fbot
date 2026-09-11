@@ -5,6 +5,7 @@ This module runs both the Telegram bot (webhook) and FastAPI server in parallel.
 Run with: python -m src.bot.bot
 """
 
+import hmac
 import logging
 from contextlib import asynccontextmanager
 
@@ -32,6 +33,7 @@ from src.bot.middlewares.album_middleware import AlbumMiddleware
 from src.bot.middlewares.i18n import I18nMiddleware
 from src.bot.utils.bot_commands import set_default_commands
 from src.bot.utils.startup_notify import notify_admins
+from src.bot.utils.webhook_secret import WEBHOOK_SECRET_HEADER, webhook_secret_token
 from src.infrastructure.cache import RedisClient
 
 # from src.infrastructure.cache.cache import Cache
@@ -213,6 +215,11 @@ async def shutdown_bot():
         await redis_client.close()
 
 
+def _expected_webhook_secret() -> str:
+    """Secret registered with ``setWebhook`` and required on ``POST /webhook``."""
+    return webhook_secret_token(config.telegram.TOKEN.get_secret_value())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for FastAPI."""
@@ -241,11 +248,18 @@ async def lifespan(app: FastAPI):
         webhook_path = "/webhook"
         full_webhook_url = f"{webhook_url}{webhook_path}"
         try:
-            await bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
+            await bot.set_webhook(
+                url=full_webhook_url,
+                drop_pending_updates=True,
+                secret_token=_expected_webhook_secret(),
+            )
             logger.info(f"Webhook set to: {full_webhook_url}")
         except Exception as e:
-            logger.warning(
-                f"Failed to set webhook: {e}. Bot will still run for API access."
+            # /webhook refuses updates without the secret, so a failed
+            # registration silences the bot: this must reach the ops channel.
+            logger.error(
+                f"Failed to set webhook: {e}. Telegram updates are refused until "
+                "the webhook is registered with the secret token; restart to retry."
             )
     else:
         logger.warning("No WEBHOOK_URL configured - webhook not set")
@@ -375,6 +389,23 @@ async def health_check():
 async def webhook_handler(request: Request):
     """Handle Telegram webhook updates."""
     global bot, dp
+
+    # The endpoint is public and admin filters trust from_user.id, so only a
+    # request carrying the secret registered in lifespan comes from Telegram.
+    # Check it before touching the body. Compare bytes: compare_digest raises
+    # TypeError on a non-ASCII str, which a forged header can contain.
+    received_secret = request.headers.get(WEBHOOK_SECRET_HEADER, "")
+    if not hmac.compare_digest(
+        received_secret.encode(), _expected_webhook_secret().encode()
+    ):
+        # WARNING, not ERROR: ERROR records are forwarded to the ops Telegram
+        # channel. The header value and the body are deliberately not logged.
+        logger.warning(
+            "Rejected webhook request with %s secret token from %s",
+            "an invalid" if received_secret else "no",
+            request.client.host if request.client else "unknown",
+        )
+        return JSONResponse(status_code=403, content={"error": "Forbidden"})
 
     if not bot or not dp:
         return JSONResponse(status_code=503, content={"error": "Bot not initialized"})
