@@ -10,6 +10,7 @@ from src.bot.filters.is_admin import IsAdmin
 from src.infrastructure.services.client import ClientService
 from src.infrastructure.services.client_transaction import ClientTransactionService
 from src.infrastructure.services.payment_allocation import PaymentAllocationService
+from src.infrastructure.services.admin_identity import resolve_admin_pk_by_telegram_id
 from src.infrastructure.tools.money_utils import parse_money
 from src.bot.utils.decorators import handle_errors
 from src.config import config
@@ -179,6 +180,13 @@ async def cash_payment_amount_received_in_verification(
     from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
     from src.infrastructure.database.dao.client_payment_event import ClientPaymentEventDAO
 
+    # Audit columns store the AdminAccount PK, not the Telegram id — resolve
+    # before writing so the cashier log can attribute this payment.
+    approver_telegram_id = message.from_user.id if message.from_user else None
+    approver_admin_pk = await resolve_admin_pk_by_telegram_id(
+        session, approver_telegram_id
+    )
+
     tx_id_str = str(transaction_id)
 
     if tx_id_str == "new":
@@ -213,7 +221,8 @@ async def cash_payment_amount_received_in_verification(
             transaction_id=new_tx.id,
             payment_type="cash",
             amount=amount,
-            approved_by_admin_id=message.from_user.id,
+            approved_by_admin_id=approver_admin_pk,
+            approved_by_telegram_id=approver_telegram_id,
             payment_provider="cash"
         )
 
@@ -228,7 +237,8 @@ async def cash_payment_amount_received_in_verification(
                     transaction_id=tx.id,
                     payment_type="cash",
                     amount=amount,
-                    approved_by_admin_id=message.from_user.id,
+                    approved_by_admin_id=approver_admin_pk,
+                    approved_by_telegram_id=approver_telegram_id,
                     payment_provider="cash"
                 )
 

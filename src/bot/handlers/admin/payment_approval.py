@@ -28,6 +28,7 @@ from src.infrastructure.services import (
     PaymentAllocationService,
     FlightMaskService,
 )
+from src.infrastructure.services.admin_identity import resolve_admin_pk_by_telegram_id
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.passport_image_resolver import _is_s3_key
 from src.infrastructure.tools.s3_manager import s3_manager
@@ -326,7 +327,8 @@ async def _process_approved_payment(
         redis:            Redis client.
         client_service:   ClientService instance.
         transaction_service: ClientTransactionService instance (reserved for future use).
-        approver_id:      Telegram ID of the approving admin.
+        approver_id:      Telegram ID of the approving admin.  Translated to the
+                          AdminAccount PK before it reaches any audit column.
         approver_name:    Display name of the approving admin.
         answer_func:      Callable that sends a reply to the admin (message.answer or
                           callback.message.answer).
@@ -406,13 +408,18 @@ async def _process_approved_payment(
     # --- Persist payment ---
     from datetime import timedelta
 
+    # Audit columns store the AdminAccount PK, not the Telegram id — resolve
+    # before writing so the cashier log can attribute this payment.
+    approver_admin_pk = await resolve_admin_pk_by_telegram_id(session, approver_id)
+
     if existing_tx and existing_tx.payment_status == "partial":
         await ClientPaymentEventDAO.create(
             session=session,
             transaction_id=existing_tx.id,
             payment_provider=payment_provider,
             amount=amount,
-            approved_by_admin_id=approver_id,
+            approved_by_admin_id=approver_admin_pk,
+            approved_by_telegram_id=approver_id,
             payment_type="online",
             payment_card_id=payment_card_id,
         )
@@ -511,7 +518,8 @@ async def _process_approved_payment(
                     else "click"
                 ),
                 amount=amount,
-                approved_by_admin_id=approver_id,
+                approved_by_admin_id=approver_admin_pk,
+                approved_by_telegram_id=approver_id,
                 payment_type="online",
                 payment_card_id=payment_card_id,
             )
@@ -575,7 +583,10 @@ async def _process_approved_payment(
             "paid_amount": final_paid if is_partial else None,
             "remaining_amount": final_remaining if is_partial else None,
             "total_amount": final_total if is_partial else None,
-            "approved_by_admin_id": approver_id,
+            # Telegram id, deliberately: analytics events are keyed by Telegram
+            # user, unlike client_payment_events.approved_by_admin_id which
+            # stores the AdminAccount PK.
+            "approved_by_telegram_id": approver_id,
         },
     )
     await session.commit()
@@ -1185,6 +1196,13 @@ async def cash_payment_amount_received(
     total_expected = payment_data["total_payment"] if payment_data else expected_amount
 
     # --- Persist payment ---
+    # Audit columns store the AdminAccount PK, not the Telegram id — resolve
+    # before writing so the cashier log can attribute this payment.
+    approver_telegram_id = message.from_user.id if message.from_user else None
+    approver_admin_pk = await resolve_admin_pk_by_telegram_id(
+        session, approver_telegram_id
+    )
+
     if is_partial and existing_tx_id:
         existing_tx = await ClientTransactionDAO.get_by_id(session, existing_tx_id)
         if not existing_tx:
@@ -1197,7 +1215,8 @@ async def cash_payment_amount_received(
             transaction_id=existing_tx.id,
             payment_provider="cash",
             amount=amount,
-            approved_by_admin_id=message.from_user.id,
+            approved_by_admin_id=approver_admin_pk,
+            approved_by_telegram_id=approver_telegram_id,
             payment_type="cash",
         )
         await PaymentAllocationService.recalculate_transaction_balance(
@@ -1285,7 +1304,8 @@ async def cash_payment_amount_received(
             transaction_id=new_tx.id,
             payment_provider="cash",
             amount=amount,
-            approved_by_admin_id=message.from_user.id,
+            approved_by_admin_id=approver_admin_pk,
+            approved_by_telegram_id=approver_telegram_id,
             payment_type="cash",
         )
     await session.commit()

@@ -381,6 +381,7 @@ class PaymentStatsDAO:
                 'transaction_id': row.transaction_id,
                 'payment_provider': row.payment_provider or 'cash',
                 'amount': float(row.amount),
+                # AdminAccount DB primary key (admin_accounts.id), not a Telegram ID.
                 'admin_id': row.approved_by_admin_id,
                 'created_at': row.created_at,
                 'is_taken_away': row.is_taken_away

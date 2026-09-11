@@ -10,6 +10,7 @@ from src.bot.filters.is_admin import IsAdmin
 from src.infrastructure.services.client import ClientService
 from src.infrastructure.services.client_transaction import ClientTransactionService
 from src.infrastructure.services.payment_allocation import PaymentAllocationService
+from src.infrastructure.services.admin_identity import resolve_admin_pk_by_telegram_id
 from src.infrastructure.tools.money_utils import parse_money
 from src.bot.utils.decorators import handle_errors
 from src.config import config
@@ -318,6 +319,14 @@ async def account_payment_amount_received(
         await state.clear()
         return
 
+    # Audit columns store the AdminAccount PK, not the Telegram id — resolve
+    # before writing so the cashier log can attribute this payment.  Placed
+    # after the guards above so an aborted flow costs no query.
+    approver_telegram_id = message.from_user.id if message.from_user else None
+    approver_admin_pk = await resolve_admin_pk_by_telegram_id(
+        session, approver_telegram_id
+    )
+
     try:
         # Create payment event with admin-entered amount
         await ClientPaymentEventDAO.create(
@@ -325,7 +334,8 @@ async def account_payment_amount_received(
             transaction_id=transaction.id,
             payment_type="online",
             amount=amount,
-            approved_by_admin_id=message.from_user.id,
+            approved_by_admin_id=approver_admin_pk,
+            approved_by_telegram_id=approver_telegram_id,
             payment_provider=provider
         )
 

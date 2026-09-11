@@ -45,7 +45,7 @@ _PERMISSION_DEFINITIONS: dict[str, list[str]] = {
     # POS (Point of Sale) Fast Cashier — intentionally a separate resource so
     # that a "Cashier" role can be granted counter-specific write access without
     # inheriting the broader payment admin operations (approve refunds, export).
-    # pos:process  →  POST /payments/process-bulk
+    # pos:process  →  POST /payments/process, /process-existing, /process-bulk
     # pos:read     →  GET  /payments/cashier-log
     # pos:adjust   →  POST /payments/adjust-balance
     "pos":            ["process", "read", "adjust", "update_status"],
