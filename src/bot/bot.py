@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import Update
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -303,7 +304,9 @@ async def _debug_validation_error(
 
     Logged at WARNING: a 422 is the client's mistake, and ERROR records are
     forwarded to the Telegram log channel. The body keeps FastAPI's default
-    ``{"detail": [...]}`` shape because the web client renders ``loc``/``msg``.
+    ``{"detail": [...]}`` shape because the web client renders ``loc``/``msg``;
+    like FastAPI's own handler it is JSON-encoded first, because ``ctx`` can
+    hold the exception a field validator raised.
     """
     import logging as _logging
 
@@ -316,7 +319,7 @@ async def _debug_validation_error(
     )
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors()},
+        content=jsonable_encoder({"detail": exc.errors()}),
     )
 
 

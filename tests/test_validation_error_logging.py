@@ -99,3 +99,29 @@ async def test_submitted_values_stay_out_of_the_log(
     assert messages and "('body', 'pin')" in messages[0]
     assert all(secret not in message for message in messages)
     assert json.loads(response.body)["detail"][0]["input"] == secret
+
+
+async def test_a_validator_exception_in_ctx_still_yields_a_422() -> None:
+    """A field validator's ValueError sits in ``ctx``; it must not turn into a 500."""
+    exc = RequestValidationError(
+        [
+            {
+                "type": "value_error",
+                "loc": ("body", "card_number"),
+                "msg": "Value error, Card number must be 16 digits",
+                "input": "1234",
+                "ctx": {"error": ValueError("Card number must be 16 digits")},
+            }
+        ]
+    )
+
+    response = await bot_module.app.exception_handlers[RequestValidationError](
+        _request("/api/v1/wallet/cards"), exc
+    )
+
+    assert response.status_code == 422
+    [error] = json.loads(response.body)["detail"]
+    assert (error["loc"], error["msg"]) == (
+        ["body", "card_number"],
+        "Value error, Card number must be 16 digits",
+    )
