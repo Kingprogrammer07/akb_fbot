@@ -45,7 +45,14 @@ class CardWithBalanceItem(BaseModel):
     payment_count: int
 
 
-# =====================================================================
+# ============================================================================
+# Authorization
+# ============================================================================
+
+# Money-moving routes take the counter write scope; card lookups are read-only
+# cashier data. Both mirror the POS router that shares this prefix.
+_RequirePosProcess = Depends(require_permission("pos", "process"))
+_RequirePosRead = Depends(require_permission("pos", "read"))
 # ============================================================================
 # Payment Processing Endpoints
 # ============================================================================
