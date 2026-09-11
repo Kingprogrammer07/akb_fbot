@@ -21,6 +21,7 @@ from src.bot.keyboards.user.inline_keyb.profile_inline_kyb import (
     edit_profile_kyb,
 )
 from src.bot.utils.decorators import handle_errors
+from src.bot.utils.flight_token import build_flight_ref
 from src.infrastructure.services.client import ClientService
 from src.infrastructure.tools.datetime_utils import to_tashkent
 from src.config import BASE_DIR
@@ -398,9 +399,10 @@ async def payment_reminder_handler(
             else _("not-set")
         )
 
+        ref = await build_flight_ref(session, client, tx.reys)
         reminder_text = _(
             "payment-reminder-item",
-            flight=tx.reys,
+            flight=ref.display,
             total=f"{total:,.0f}",
             paid=f"{paid:,.0f}",
             remaining=f"{remaining:,.0f}",
@@ -410,8 +412,8 @@ async def payment_reminder_handler(
 
         # Add payment button for this flight
         builder.button(
-            text=_("btn-make-payment-now") + f" - {tx.reys}",
-            callback_data=f"pay_flight:{tx.reys}",
+            text=_("btn-make-payment-now") + f" - {ref.display}",
+            callback_data=f"pay_flight:{ref.token}",
         )
 
     # Add warning text

@@ -13,6 +13,11 @@ from redis.asyncio import Redis
 from src.bot.filters.is_private_chat import IsPrivate
 from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.utils.decorators import handle_errors
+from src.bot.utils.flight_token import (
+    FlightRef,
+    build_flight_refs,
+    resolve_flight_token,
+)
 from src.bot.utils.sheets_cache import get_client_sheets_data
 from src.bot.utils.currency_cache import convert_to_uzs
 from src.infrastructure.services import ClientService
@@ -41,20 +46,28 @@ async def _safe_answer(callback: CallbackQuery, text: str = "", show_alert: bool
 def _build_flight_keyboard(
     matches: list[dict],
     payment_map: dict,
+    refs: dict[str, FlightRef],
     _: callable,
 ) -> InlineKeyboardBuilder:
-    """Build the flights list inline keyboard."""
+    """Build the flights list inline keyboard.
+
+    Both the label and the callback payload carry the partner-facing
+    identifiers only — see :mod:`src.bot.utils.flight_token`.
+    """
     builder = InlineKeyboardBuilder()
     for match in matches:
         flight_name = match["flight_name"]
+        ref = refs.get(flight_name)
+        if ref is None:
+            continue
         payment_data = payment_map.get(flight_name)
         if payment_data:
-            button_text = f"✈️ {flight_name} - {payment_data['total_payment']:,.2f} so'm"
+            button_text = f"✈️ {ref.display} - {payment_data['total_payment']:,.2f} so'm"
         else:
-            button_text = f"✈️ {flight_name} - {_('info-report-not-sent')}"
+            button_text = f"✈️ {ref.display} - {_('info-report-not-sent')}"
         builder.button(
             text=button_text,
-            callback_data=f"info_flight:{flight_name}:{match['row_number']}",
+            callback_data=f"info_flight:{ref.token}:{match['row_number']}",
         )
     builder.button(text=_("btn-refresh"), callback_data="refresh_info_flights")
     builder.adjust(1)
@@ -218,7 +231,10 @@ async def info_handler(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    refs        = await build_flight_refs(
+        session, client, [m["flight_name"] for m in result["matches"]]
+    )
+    builder     = _build_flight_keyboard(result["matches"], payment_map, refs, _)
 
     await message.answer(_("info-flights-list"), reply_markup=builder.as_markup())
 
@@ -235,17 +251,27 @@ async def flight_details_handler(
 ):
     """Show flight details when user selects a flight."""
     parts = callback.data.split(":")
-    if len(parts) != 3:
+    if len(parts) != 3 or not parts[2].isascii() or not parts[2].isdigit():
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
-
-    flight_name = parts[1]
-    row_number  = int(parts[2])
 
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
+
+    # Restrict the token to the flights this client was actually offered,
+    # so a probed alias id cannot echo back another flight's mask.
+    result = await get_client_sheets_data(client.active_codes, redis)
+    offered = {m["flight_name"] for m in result["matches"]} if result["found"] else set()
+
+    ref = await resolve_flight_token(session, client, parts[1], allowed=offered)
+    if ref is None:
+        await _safe_answer(callback, _("error-occurred"), show_alert=True)
+        return
+
+    flight_name = ref.real
+    row_number  = int(parts[2])
 
     payment_data = await calculate_flight_payment(
         session, flight_name, client.active_codes, redis
@@ -253,7 +279,6 @@ async def flight_details_handler(
 
     # No cargo yet — show "report not sent" message
     if not payment_data:
-        result = await get_client_sheets_data(client.active_codes, redis)
         track_info = "N/A"
         if result["found"] and result["matches"]:
             codes = result["matches"][0].get("track_codes", [])
@@ -262,7 +287,7 @@ async def flight_details_handler(
         await callback.message.edit_text(
             _(
                 "info-report-not-sent-message",
-                flight_name=flight_name,
+                flight_name=ref.display,
                 client_code=client.primary_code,
                 track_codes=_("admin-leftover-column-track-code") + ": " + track_info,
             ),
@@ -308,7 +333,7 @@ async def flight_details_handler(
         details_text = _(
             "info-flight-details-partial",
             client_code=client.primary_code,
-            worksheet=flight_name,
+            worksheet=ref.display,
             total=f"{total_amount:,.2f}",
             paid=f"{paid_amount:,.2f}",
             remaining=f"{remaining_amount:,.2f}",
@@ -320,7 +345,7 @@ async def flight_details_handler(
         details_text = _(
             "info-flight-details-with-status",
             client_code=client.primary_code,
-            worksheet=flight_name,
+            worksheet=ref.display,
             summa=f"{payment_data['total_payment']:,.2f}",
             vazn=f"{payment_data['total_weight']:.2f}",
             trek_kodlari=trek_kodlari_text,
@@ -334,12 +359,12 @@ async def flight_details_handler(
     builder = InlineKeyboardBuilder()
     builder.button(
         text=_("btn-view-cargo-photos"),
-        callback_data=f"view_cargo_photos:{flight_name}",
+        callback_data=f"view_cargo_photos:{ref.token}",
     )
     if not transaction or transaction.payment_status in ("partial", "pending"):
         builder.button(
             text=_("btn-make-payment-now"),
-            callback_data=f"pay_flight:{flight_name}",
+            callback_data=f"pay_flight:{ref.token}",
         )
     builder.button(text=_("btn-back-to-flights"), callback_data="back_to_flights")
     builder.adjust(1)
@@ -369,7 +394,10 @@ async def back_to_flights_callback(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    refs        = await build_flight_refs(
+        session, client, [m["flight_name"] for m in result["matches"]]
+    )
+    builder     = _build_flight_keyboard(result["matches"], payment_map, refs, _)
 
     await callback.message.edit_text(_("info-flights-list"), reply_markup=builder.as_markup())
     await _safe_answer(callback)
@@ -398,7 +426,10 @@ async def refresh_info_flights_callback(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    refs        = await build_flight_refs(
+        session, client, [m["flight_name"] for m in result["matches"]]
+    )
+    builder     = _build_flight_keyboard(result["matches"], payment_map, refs, _)
 
     try:
         await callback.message.delete()
@@ -428,12 +459,17 @@ async def view_cargo_photos_handler(
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
+
+    ref = await resolve_flight_token(session, client, parts[1])
+    if ref is None:
+        await _safe_answer(callback, _("error-occurred"), show_alert=True)
+        return
+
+    flight_name = ref.real
 
     cargos = await FlightCargoDAO.get_by_client(session, flight_name, client.active_codes)
     if not cargos:
@@ -473,7 +509,7 @@ async def view_cargo_photos_handler(
         _(
             "info-cargo-photos-summary",
             total=total_sent,
-            flight_name=flight_name,
+            flight_name=ref.display,
             client_code=client.primary_code,
         )
     )
