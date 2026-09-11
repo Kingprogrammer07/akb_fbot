@@ -152,14 +152,36 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             return fallback
 
     @staticmethod
-    def _decode_response_body(response_body: bytes) -> str | None:
+    def _decode_response_body(response_body: bytes, response_status: int) -> str | None:
         if not response_body:
             return None
         text = response_body.decode("utf-8", errors="replace")
         try:
-            return RequestLoggingMiddleware._json_dumps(json.loads(text))
+            payload = json.loads(text)
         except json.JSONDecodeError:
             return text
+        if response_status == 422:
+            payload = RequestLoggingMiddleware._without_submitted_input(payload)
+        return RequestLoggingMiddleware._json_dumps(payload)
+
+    @staticmethod
+    def _without_submitted_input(payload: object) -> object:
+        """
+        Drop ``input`` from every ``detail`` item of a validation error body.
+
+        Each item echoes the rejected value: a PIN, a passport number, or the
+        whole submitted object when a field is missing. The client still gets
+        it back in the response; the log line and ``api_request_logs`` must not.
+        """
+        if not isinstance(payload, dict) or not isinstance(payload.get("detail"), list):
+            return payload
+        detail = [
+            {key: value for key, value in item.items() if key != "input"}
+            if isinstance(item, dict)
+            else item
+            for item in payload["detail"]
+        ]
+        return {**payload, "detail": detail}
 
     @staticmethod
     async def _clone_response_with_body(response: Response) -> tuple[Response, bytes]:
@@ -200,7 +222,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         if exception is not None:
             parts.append(f"exception={type(exception).__name__}: {exception}")
 
-        decoded_body = self._decode_response_body(response_body or b"")
+        decoded_body = self._decode_response_body(response_body or b"", response_status)
         if decoded_body:
             parts.append(f"response={decoded_body}")
 
