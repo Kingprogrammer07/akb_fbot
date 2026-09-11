@@ -25,10 +25,9 @@ from src.infrastructure.services import (
     PaymentCardService,
     ClientTransactionService,
 )
-from src.infrastructure.services.flight_mask import FlightMaskService
-from src.infrastructure.services.partner_resolver import (
-    PartnerNotFoundError,
-    get_resolver,
+from src.infrastructure.services.flight_display import (
+    FLIGHT_PLACEHOLDER,
+    flight_mask_for_client,
 )
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.s3_manager import s3_manager
@@ -84,39 +83,18 @@ async def _get_random_card(session: AsyncSession, callback_or_message, _: callab
 async def _resolve_mask(
     session: AsyncSession, client, real_flight_name: str
 ) -> str | None:
-    """Return the partner-specific mask, or ``None`` when no alias exists.
+    """Return the partner-specific mask, or ``None`` when there can be none.
 
-    Used by callers that must hide the real flight name entirely when no
-    mask is configured yet.
+    Thin wrapper over :func:`flight_mask_for_client` so every call site in
+    this module keeps reading the same way.  Never returns the real flight
+    name: callers either drop the flight clause or render
+    :data:`FLIGHT_PLACEHOLDER`.
     """
-    if not real_flight_name or not client or not client.active_codes:
+    if not client:
         return None
-    partner = None
-    for code in client.active_codes:
-        try:
-            partner = await get_resolver().resolve_by_client_code(session, code)
-            break
-        except PartnerNotFoundError:
-            continue
-    if not partner:
-        return None
-    return await FlightMaskService.real_to_mask(
-        session, partner.id, real_flight_name
+    return await flight_mask_for_client(
+        session, client.active_codes, real_flight_name
     )
-
-
-async def _display_flight(
-    session: AsyncSession,
-    client,
-    real_flight_name: str,
-) -> str:
-    """Best-effort mask lookup with a fallback to the real flight name.
-
-    Use :func:`_resolve_mask` instead when the caller must hide the real
-    name when no mask exists.
-    """
-    masked = await _resolve_mask(session, client, real_flight_name)
-    return masked or real_flight_name
 
 
 async def _get_existing_tx(session: AsyncSession, active_codes, flight_name: str):
@@ -536,7 +514,7 @@ async def payment_type_cash_selected(
         final_payable_amount=0,
     )
 
-    display_flight = (await _resolve_mask(session, client, flight_name)) or "—"
+    display_flight = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
     confirmation_text = _(
         "payment-cash-confirmation",
         flight_name=display_flight,
@@ -595,7 +573,7 @@ async def pay_full_handler(
         shown_card_id=card.id,
     )
 
-    display_flight = (await _resolve_mask(session, client, flight_name)) or "—"
+    display_flight = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
     payment_info = _(
         "payment-info",
         client_code=client.primary_code,
@@ -665,7 +643,7 @@ async def pay_full_remaining_handler(
         shown_card_id=card.id,
     )
 
-    display_flight = (await _resolve_mask(session, client, flight_name)) or "—"
+    display_flight = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
     payment_info = _(
         "payment-info-remaining",
         client_code=client.primary_code,
@@ -731,7 +709,7 @@ async def pay_partial_handler(
         remaining_amount = total_amount
         deadline_text = (datetime.now(timezone.utc) + timedelta(days=15)).strftime("%Y-%m-%d %H:%M")
 
-    display_flight_local = (await _resolve_mask(session, client, flight_name)) or flight_name
+    display_flight_local = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
     info_text = _(
         "payment-partial-info",
         flight=display_flight_local,
@@ -836,7 +814,7 @@ async def partial_amount_received(
         return
     await state.update_data(shown_card_id=card.id)
 
-    display_flight = (await _resolve_mask(session, client, flight_name)) or "—"
+    display_flight = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
     payment_info = _(
         "payment-info-partial",
         client_code=client.primary_code,
@@ -908,7 +886,7 @@ async def payment_wallet_toggle_handler(
             )
             builder.button(text=_("btn-payment-wallet-only"), callback_data=f"payment_wallet_only:{flight_name}")
         else:
-            display_flight_local = (await _resolve_mask(session, client, flight_name)) or "—"
+            display_flight_local = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
             message_text = _(
                 "payment-cash-confirmation",
                 flight_name=display_flight_local,
@@ -940,7 +918,7 @@ async def payment_wallet_toggle_handler(
                 "full_remaining": "payment-info-remaining",
             }.get(payment_mode, "payment-info")
 
-            display_flight_local = (await _resolve_mask(session, client, flight_name)) or "—"
+            display_flight_local = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
             if use_wallet and wallet_used > 0:
                 message_text = _(
                     "payment-info-with-wallet",
@@ -1052,7 +1030,7 @@ async def payment_wallet_only_handler(
             text=caption,
             reply_markup=builder.as_markup(),
         )
-        display_flight_local = (await _resolve_mask(session, client, flight_name)) or flight_name
+        display_flight_local = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
         await callback.message.edit_text(_(
             "payment-wallet-only-submitted",
             flight=display_flight_local,

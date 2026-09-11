@@ -26,7 +26,10 @@ from src.infrastructure.services import (
     ClientService,
     ClientTransactionService,
     PaymentAllocationService,
-    FlightMaskService,
+)
+from src.infrastructure.services.flight_display import (
+    flight_label_for_client,
+    flight_mask_for_client,
 )
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.passport_image_resolver import _is_s3_key
@@ -350,8 +353,9 @@ async def _process_approved_payment(
         await state.clear()
         return
 
-    display_worksheet = await FlightMaskService.real_to_mask(session, 1, worksheet)
-    display_worksheet = display_worksheet or worksheet
+    display_worksheet = await flight_label_for_client(
+        session, client.active_codes, worksheet
+    )
 
     # --- Redis lookups ---
     wallet_used = await _get_redis_float(redis, f"wallet_used:{client_code}:{worksheet}")
@@ -907,12 +911,15 @@ async def reject_payment_callback(
     client = await client_service.get_client_by_code(client_code, session)
     user_text = _user_translator(client)
 
-    display_flight = await FlightMaskService.real_to_mask(session, 1, flight_name)
-    display_flight = display_flight or flight_name
+    # No mask -> the flight clause is dropped entirely; the real name never
+    # reaches the client.
+    display_flight = await flight_mask_for_client(
+        session, client.active_codes if client else client_code, flight_name
+    )
 
     user_msg = (
         f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi. Admin bilan bog'laning."
-        if flight_name
+        if display_flight
         else user_text("payment-rejected-user")
     )
     if client:
@@ -984,20 +991,23 @@ async def _do_rejection(
     )
     user_text = _user_translator(client)
 
-    display_flight = await FlightMaskService.real_to_mask(session, 1, flight_name)
-    display_flight = display_flight or flight_name
+    # No mask -> the flight clause is dropped entirely; the real name never
+    # reaches the client.
+    display_flight = await flight_mask_for_client(
+        session, client.active_codes if client else client_code, flight_name
+    )
 
     # User notification
     if comment:
         user_msg = (
             f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi.\n💬 Sabab: {comment}"
-            if flight_name
+            if display_flight
             else user_text("payment-rejected-with-comment", comment=comment)
         )
     else:
         user_msg = (
             f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi. Admin bilan bog'laning."
-            if flight_name
+            if display_flight
             else user_text("payment-rejected-user")
         )
 
@@ -1144,8 +1154,6 @@ async def cash_payment_amount_received(
     data = await state.get_data()
     telegram_id = data["cash_telegram_id"]
     worksheet = data["cash_worksheet"]
-    display_worksheet = await FlightMaskService.real_to_mask(session, 1, worksheet)
-    display_worksheet = display_worksheet or worksheet
     client_code = data["cash_client_code"]
     expected_amount = data.get("cash_expected_amount", 0)
     admin_message_id = data.get("cash_message_id")
@@ -1163,6 +1171,11 @@ async def cash_payment_amount_received(
         await message.answer(_("client-not-found"))
         await state.clear()
         return
+
+    # Masked only once the client is known - the mask is per-partner.
+    display_worksheet = await flight_label_for_client(
+        session, client.active_codes, worksheet
+    )
 
     from src.infrastructure.tools.datetime_utils import get_current_time
     from src.bot.handlers.user.make_payment import calculate_flight_payment

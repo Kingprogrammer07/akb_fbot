@@ -9,6 +9,7 @@ from src.infrastructure.database.dao.client_transaction import ClientTransaction
 from src.infrastructure.database.dao.client_payment_event import ClientPaymentEventDAO
 from src.infrastructure.services.client import ClientService
 from src.infrastructure.services.client_transaction import ClientTransactionService
+from src.infrastructure.services.flight_display import flight_label_for_client
 from src.infrastructure.services.payment_allocation import PaymentAllocationService
 from src.infrastructure.tools.datetime_utils import get_current_time, to_tashkent
 from src.infrastructure.tools.money_utils import money
@@ -363,9 +364,9 @@ class PaymentService:
                 wallet_deducted=wallet_deducted if request.use_balance else None,
             )
 
-            from src.infrastructure.services.flight_mask import FlightMaskService
-            masked_flight = await FlightMaskService.real_to_mask(session, 1, request.flight)
-            display_flight = masked_flight or request.flight
+            display_flight = await flight_label_for_client(
+                session, client.active_codes, request.flight
+            )
 
             return ProcessPaymentResponse(
                 payment=PaymentResult(
@@ -551,9 +552,9 @@ class PaymentService:
                 wallet_deducted=wallet_deducted if request.use_balance else None,
             )
 
-            from src.infrastructure.services.flight_mask import FlightMaskService
-            masked_flight = await FlightMaskService.real_to_mask(session, 1, transaction.reys or "Unknown")
-            display_flight = masked_flight or (transaction.reys or "Unknown")
+            display_flight = await flight_label_for_client(
+                session, client.active_codes, transaction.reys
+            )
 
             return ProcessPaymentResponse(
                 payment=PaymentResult(

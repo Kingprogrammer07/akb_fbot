@@ -10,11 +10,7 @@ from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.states.user_track_check import UserTrackCheckStates
 from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.services.cargo_item import CargoItemService
-from src.infrastructure.services.flight_mask import FlightMaskService
-from src.infrastructure.services.partner_resolver import (
-    PartnerNotFoundError,
-    get_resolver,
-)
+from src.infrastructure.services.flight_display import FlightDisplay
 from src.infrastructure.database.models.analytics_event import AnalyticsEvent
 from src.bot.utils.decorators import handle_errors
 from src.bot.utils.safe_sender import safe_execute
@@ -187,36 +183,19 @@ async def _apply_flight_mask(
 ) -> None:
     """Mutate ``items`` in place, replacing ``flight_name`` with the partner mask.
 
-    The user's owning partner is resolved from their primary ``client_code``.
-    Items belonging to other partners (rare — happens when a track code is
-    shared) keep the real flight name as a defensive fallback.
+    The user's owning partner is resolved from any of their ``active_codes``.
+    A row whose mask cannot be resolved (unknown partner, or a track code
+    shared from another partner's cargo) is blanked to
+    :data:`FLIGHT_PLACEHOLDER` — the real flight name is never rendered.
     """
     if not items:
         return
     client = await ClientDAO.get_by_telegram_id(session, telegram_id)
-    primary_code = (
-        client.primary_code if client and client.primary_code else None
+    display = await FlightDisplay.for_client(
+        session, client.active_codes if client else None
     )
-    if not primary_code:
-        return
-    try:
-        partner = await get_resolver().resolve_by_client_code(session, primary_code)
-    except PartnerNotFoundError:
-        return
 
-    cache: dict[str, str] = {}
     for item in items:
-        real = item.get("flight_name")
-        if not real:
+        if not item.get("flight_name"):
             continue
-        if real in cache:
-            item["flight_name"] = cache[real]
-            continue
-        masked = await FlightMaskService.real_to_mask(
-            session, partner.id, real
-        )
-        if masked:
-            cache[real] = masked
-            item["flight_name"] = masked
-        else:
-            cache[real] = real
+        item["flight_name"] = await display.label(session, item["flight_name"])

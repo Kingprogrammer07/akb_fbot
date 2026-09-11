@@ -8,8 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.client_payment_event import ClientPaymentEventDAO
-from src.infrastructure.services.flight_mask import FlightMaskService
-from src.infrastructure.services.partner_resolver import get_resolver, PartnerNotFoundError
+from src.infrastructure.services.flight_display import FlightDisplay
 from src.api.schemas.payment import (
     PaymentBreakdownSchema,
     TransactionHistoryItemSchema,
@@ -54,15 +53,10 @@ async def get_client_transaction_history(
         filter_type="all",
     )
 
-    primary_code = client_code[0] if isinstance(client_code, list) and client_code else (client_code if isinstance(client_code, str) else None)
-    partner = None
-    if primary_code:
-        try:
-            partner = await get_resolver().resolve_by_client_code(session, primary_code)
-        except PartnerNotFoundError:
-            pass
+    # Every code is tried, not just the first: a client may hold a
+    # pre-conversion alias alongside its current code.
+    display = await FlightDisplay.for_client(session, client_code)
 
-    cache: dict[str, str] = {}
     items: list[TransactionHistoryItemSchema] = []
     for tx in transactions:
         # Build payment breakdown for paid / partial transactions
@@ -78,18 +72,8 @@ async def get_client_transaction_history(
                 card=float(raw.get("card", 0) or 0),
             )
 
-        real_flight = tx.reys
-        display_flight = real_flight
-        if real_flight and partner:
-            if real_flight in cache:
-                display_flight = cache[real_flight]
-            else:
-                masked = await FlightMaskService.real_to_mask(session, partner.id, real_flight)
-                if masked:
-                    cache[real_flight] = masked
-                    display_flight = masked
-                else:
-                    cache[real_flight] = real_flight
+        # No mask -> placeholder; the real flight name never reaches the user.
+        display_flight = await display.label(session, tx.reys)
 
         items.append(
             TransactionHistoryItemSchema(
