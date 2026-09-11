@@ -68,3 +68,34 @@ async def test_validation_error_is_logged_as_warning_not_error(
 
     assert response.status_code == 422
     assert json.loads(response.body) == {"detail": json.loads(json.dumps(exc.errors()))}
+
+
+async def test_submitted_values_stay_out_of_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rejected body can carry a PIN or a passport number; only the client sees it back."""
+    secret = "4821-secret-pin"
+    exc = RequestValidationError(
+        [
+            {
+                "type": "string_too_short",
+                "loc": ("body", "pin"),
+                "msg": "String should have at least 6 characters",
+                "input": secret,
+            }
+        ]
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="src.bot.bot"):
+        response = await bot_module.app.exception_handlers[RequestValidationError](
+            _request("/api/v1/auth/login"), exc
+        )
+
+    messages = [
+        r.getMessage()
+        for r in caplog.records
+        if "RequestValidationError" in r.getMessage()
+    ]
+    assert messages and "('body', 'pin')" in messages[0]
+    assert all(secret not in message for message in messages)
+    assert json.loads(response.body)["detail"][0]["input"] == secret

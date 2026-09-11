@@ -293,11 +293,12 @@ async def _debug_validation_error(
     """
     import logging as _logging
 
+    # Submitted values (PINs, passport numbers) go back to the client only.
     _logging.getLogger(__name__).warning(
         "422 RequestValidationError on %s %s — errors: %s",
         request.method,
         request.url.path,
-        exc.errors(),
+        [{key: value for key, value in error.items() if key != "input"} for error in exc.errors()],
     )
     return JSONResponse(
         status_code=422,
