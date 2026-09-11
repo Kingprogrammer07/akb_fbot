@@ -99,7 +99,8 @@ async def get_profile(
         region_display = _(UZBEKISTAN_REGIONS[client.region])
     else:
         key = UZBEKISTAN_REGIONS.get(client.region, client.region)
-        region_display = _(key)
+        # The column is nullable, and the translator returns a missing key as is.
+        region_display = _(key) if key else _("not-provided")
 
     # 4. Format District
     district_display = _get_district_display(client.region, client.district, language)
@@ -177,7 +178,7 @@ async def update_profile(
         passport_images = await resolve_passport_items(passport_images)
 
     region_key = UZBEKISTAN_REGIONS.get(updated_client.region, updated_client.region)
-    region_display = _(region_key)
+    region_display = _(region_key) if region_key else _("not-provided")
 
     # Format district
     district_display = _get_district_display(updated_client.region, updated_client.district, language)
