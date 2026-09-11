@@ -1,5 +1,6 @@
 import logging
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,10 +50,13 @@ class RBACService:
         # Build list of "resource:action" strings
         perms_set = {perm.slug for perm in role.permissions}
         
-        # Cache in Redis using sadd
+        # SADD and EXPIRE in one MULTI/EXEC transaction, so a failure between
+        # two round trips can never leave the set without its TTL.
         if perms_set:
-            await redis.sadd(cache_key, *perms_set)
-            await redis.expire(cache_key, PERMISSIONS_TTL)
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.sadd(cache_key, *perms_set)
+                pipe.expire(cache_key, PERMISSIONS_TTL)
+                await pipe.execute()
             
         return perms_set
 
@@ -61,6 +65,19 @@ class RBACService:
         """
         Clear cached permissions for a role. 
         Call this immediately after editing a role's permissions in the DB.
+
+        Callers invalidate after committing, so a Redis failure is logged, not
+        raised: raising would report an error for a change that is already
+        saved, while the stale entry still expires within PERMISSIONS_TTL.
         """
         cache_key = CacheKeys.role_permissions(role_name)
-        await redis.delete(cache_key)
+        try:
+            await redis.delete(cache_key)
+        except RedisError:
+            logger.warning(
+                "Could not invalidate the cached permissions of role %r; they "
+                "may stay stale for up to %s seconds",
+                role_name,
+                PERMISSIONS_TTL,
+                exc_info=True,
+            )

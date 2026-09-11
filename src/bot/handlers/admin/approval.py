@@ -191,7 +191,9 @@ async def approve_client(
             "client_id":          client.id,
             "client_code":        client_code,
             "full_name":          client.full_name,
-            "approved_by_admin_id": callback.from_user.id if callback.from_user else None,
+            # Telegram id, not an AdminAccount PK — analytics events are keyed
+            # by Telegram user throughout.
+            "approved_by_telegram_id": callback.from_user.id if callback.from_user else None,
         },
     )
     await session.commit()

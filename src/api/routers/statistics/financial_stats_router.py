@@ -3,11 +3,16 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_db, get_admin_from_jwt
+from src.api.dependencies import get_db, require_permission
 from src.api.schemas.statistics.financial_stats import FinancialStatsResponse
 from src.api.services.statistics.financial_stats_service import FinancialStatsService
 
-router = APIRouter(prefix="/statistics/financial", tags=["Financial Statistics"])
+router = APIRouter(
+    prefix="/statistics/financial",
+    tags=["Financial Statistics"],
+    # Statistics are staff-only data, gated by statistics:read.
+    dependencies=[Depends(require_permission("statistics", "read"))],
+)
 
 
 @router.get("", response_model=FinancialStatsResponse)
@@ -18,7 +23,6 @@ async def get_financial_stats(
         8.0, description="1 kg yuk uchun asosiy xarajat (USD, foyda hisoblash uchun)"
     ),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     """
     Get financial statistics.
@@ -37,7 +41,6 @@ async def export_financial_stats(
         8.0, description="1 kg yuk uchun asosiy xarajat (USD, foyda hisoblash uchun)"
     ),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     """
     Export financial statistics to Excel.

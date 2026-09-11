@@ -4,12 +4,16 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_db
-from src.api.routers.admin_auth import get_admin_from_jwt
+from src.api.dependencies import get_db, require_permission
 from src.api.schemas.statistics.client_stats import ClientStatsResponse
 from src.api.services.statistics.client_stats_service import ClientStatsService
 
-router = APIRouter(prefix="/statistics/clients", tags=["Statistics: Clients"])
+router = APIRouter(
+    prefix="/statistics/clients",
+    tags=["Statistics: Clients"],
+    # Statistics are staff-only data, gated by statistics:read.
+    dependencies=[Depends(require_permission("statistics", "read"))],
+)
 
 
 @router.get(
@@ -22,7 +26,6 @@ async def get_client_stats(
     start_date: date | None = Query(None, description="Boshlanish sanasi (Y-M-D)"),
     end_date: date | None = Query(None, description="Tugash sanasi (Y-M-D)"),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     service = ClientStatsService(session)
     return await service.get_stats(start_date, end_date)
@@ -37,7 +40,6 @@ async def export_client_stats_excel(
     start_date: date | None = Query(None, description="Boshlanish sanasi (Y-M-D)"),
     end_date: date | None = Query(None, description="Tugash sanasi (Y-M-D)"),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     service = ClientStatsService(session)
     excel_stream = await service.get_stats_excel(start_date, end_date)
@@ -72,7 +74,6 @@ async def export_zombie_clients_excel(
     start_date: date | None = Query(None, description="Boshlanish sanasi (Y-M-D)"),
     end_date: date | None = Query(None, description="Tugash sanasi (Y-M-D)"),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     service = ClientStatsService(session)
     sd = start_date.strftime("%Y-%m-%d") if start_date else "boshidan"
@@ -92,7 +93,6 @@ async def export_passive_clients_excel(
     start_date: date | None = Query(None, description="Boshlanish sanasi (Y-M-D)"),
     end_date: date | None = Query(None, description="Tugash sanasi (Y-M-D)"),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     service = ClientStatsService(session)
     sd = start_date.strftime("%Y-%m-%d") if start_date else "boshidan"
@@ -111,7 +111,6 @@ async def export_passive_clients_excel(
 async def export_frequent_clients_excel(
     min_flights: int = Query(5, ge=1, description="Minimal reys soni (default: 5)"),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     service = ClientStatsService(session)
     return _excel_response(
