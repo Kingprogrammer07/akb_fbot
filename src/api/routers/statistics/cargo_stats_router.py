@@ -10,7 +10,12 @@ from src.api.schemas.statistics.cargo_stats import CargoStatsResponse
 from src.infrastructure.database.dao.statistics.cargo_stats import CargoStatsDAO
 from src.api.services.statistics.cargo_stats_service import CargoStatsService
 
-router = APIRouter(prefix="/statistics/cargo", tags=["Statistics: Cargo"])
+router = APIRouter(
+    prefix="/statistics/cargo",
+    tags=["Statistics: Cargo"],
+    # Statistics are staff-only data.
+    dependencies=[Depends(get_admin_from_jwt)],
+)
 
 
 @router.get(
@@ -23,7 +28,6 @@ async def get_cargo_stats(
     start_date: date | None = Query(None, description="Boshlanish sanasi (Y-M-D)"),
     end_date: date | None = Query(None, description="Tugash sanasi (Y-M-D)"),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     dao = CargoStatsDAO(session)
     service = CargoStatsService(dao)
@@ -39,7 +43,6 @@ async def export_cargo_stats_excel(
     start_date: date | None = Query(None, description="Boshlanish sanasi (Y-M-D)"),
     end_date: date | None = Query(None, description="Tugash sanasi (Y-M-D)"),
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     dao = CargoStatsDAO(session)
     service = CargoStatsService(dao)

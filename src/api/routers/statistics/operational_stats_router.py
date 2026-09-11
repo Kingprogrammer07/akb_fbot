@@ -11,7 +11,12 @@ from src.api.services.statistics.operational_stats_service import (
     OperationalStatsService,
 )
 
-router = APIRouter(prefix="/operational", tags=["Statistics - Operational"])
+router = APIRouter(
+    prefix="/operational",
+    tags=["Statistics - Operational"],
+    # Statistics are staff-only data.
+    dependencies=[Depends(get_admin_from_jwt)],
+)
 
 
 @router.get("/summary", response_model=OperationalStatsResponse)
@@ -19,7 +24,6 @@ async def get_operational_summary(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     """
     Get operational statistics summary (bottlenecks, stage times).
@@ -32,7 +36,6 @@ async def export_operational_stats(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     session: AsyncSession = Depends(get_db),
-    # admin=Depends(get_admin_from_jwt),
 ):
     """
     Export operational stats to Excel.
