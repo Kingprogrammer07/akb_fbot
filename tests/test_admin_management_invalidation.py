@@ -180,3 +180,28 @@ async def test_untouched_update_does_not_invalidate(monkeypatch, redis_client, s
     )
 
     assert await redis_client.get(key) is not None
+
+
+async def test_redis_outage_does_not_fail_a_committed_status_change(
+    monkeypatch: pytest.MonkeyPatch, session: FakeSession
+) -> None:
+    """
+    The status change is already committed when the identity is invalidated.
+    A Redis failure at that point must not turn a saved change into an error
+    response; revocation then falls back to the identity cache TTL.
+    """
+    stub_target(monkeypatch, make_target())
+    server = fakeredis.FakeServer()
+    server.connected = False
+    unreachable_redis = fakeredis.aioredis.FakeRedis(server=server, decode_responses=True)
+
+    response = await admin_management.update_admin_status(
+        admin_account_id=TARGET_ID,
+        body=UpdateAdminStatusRequest(is_active=False),
+        admin=ACTING_ADMIN,
+        session=session,
+        redis=unreachable_redis,
+    )
+
+    assert response.id == TARGET_ID
+    assert response.is_active is False

@@ -32,6 +32,7 @@ import logging
 from dataclasses import dataclass
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.cache.keys import CacheKeys
@@ -137,16 +138,33 @@ class AdminIdentityService:
         database.  Call it immediately after changing an admin's active status,
         role or existence.
 
-        The version counter is bumped *before* the entry is dropped: a
-        concurrent request that already read the old state can still write its
-        snapshot afterwards, but it will carry the superseded version and be
-        ignored rather than silently restoring revoked access.
+        The version counter is bumped in the same MULTI/EXEC transaction that
+        drops the entry: a concurrent request that already read the old state
+        can still write its snapshot afterwards, but it will carry the
+        superseded version and be ignored rather than silently restoring
+        revoked access.
+
+        Callers invalidate after committing, so a Redis failure is logged, not
+        raised: raising would report an error for a change that is already
+        saved, while the stale entry still expires within :data:`IDENTITY_TTL`.
         """
         version_key = CacheKeys.admin_identity_version(admin_id)
 
-        await redis.incr(version_key)
-        await redis.expire(version_key, IDENTITY_VERSION_TTL)
-        await redis.delete(CacheKeys.admin_identity(admin_id))
+        try:
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.incr(version_key)
+                pipe.expire(version_key, IDENTITY_VERSION_TTL)
+                pipe.delete(CacheKeys.admin_identity(admin_id))
+                await pipe.execute()
+        except RedisError:
+            logger.warning(
+                "Could not invalidate the cached identity of admin_id=%s; the "
+                "change takes effect within %s seconds instead of on the next "
+                "request",
+                admin_id,
+                IDENTITY_TTL,
+                exc_info=True,
+            )
 
     # -- internals ---------------------------------------------------------
 
