@@ -11,7 +11,7 @@ from src.bot.filters.is_admin import IsAdmin
 from src.infrastructure.services.client import ClientService
 from src.infrastructure.services.client_transaction import ClientTransactionService
 from src.infrastructure.services.payment_allocation import PaymentAllocationService
-from src.infrastructure.services.admin_identity import resolve_admin_pk_by_telegram_id
+from src.infrastructure.services.admin_identity_service import resolve_admin_pk_by_telegram_id
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.client_payment_event import ClientPaymentEventDAO

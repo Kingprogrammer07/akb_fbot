@@ -31,7 +31,7 @@ from src.infrastructure.services.flight_display import (
     flight_label_for_client,
     flight_mask_for_client,
 )
-from src.infrastructure.services.admin_identity import resolve_admin_pk_by_telegram_id
+from src.infrastructure.services.admin_identity_service import resolve_admin_pk_by_telegram_id
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.passport_image_resolver import _is_s3_key
 from src.infrastructure.tools.s3_manager import s3_manager
