@@ -2,7 +2,7 @@ import asyncio
 from logging.config import fileConfig
 
 from sqlalchemy import pool
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
@@ -104,7 +104,8 @@ async def run_async_migrations() -> None:
 # Entrypoint
 # ================================
 def run_migrations_online() -> None:
-    print("ALEMBIC DATABASE URL =", DATABASE_URL)
+    # Shows which database is migrated; the password never reaches a console or log.
+    print("ALEMBIC DATABASE URL =", make_url(DATABASE_URL).render_as_string(hide_password=True))
     asyncio.run(run_async_migrations())
 
 
