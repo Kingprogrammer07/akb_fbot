@@ -6,6 +6,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Historic default for API_JWT_SECRET that shipped in the repository. Anyone who
+# read the source could forge a `role: "super-admin"` token while it was in use,
+# so it is rejected outright rather than silently accepted.
+JWT_SECRET_PLACEHOLDERS = frozenset({
+    'changeme-please-set-a-real-secret-in-env-min-32-chars',
+})
+JWT_SECRET_MIN_LENGTH = 32
+
 
 class BotConfig(BaseSettings):
     model_config = SettingsConfigDict(
@@ -263,14 +271,48 @@ class APIConfig(BaseSettings):
     # Add these to .env:  API_JWT_SECRET, API_JWT_ALGORITHM, API_JWT_EXPIRE_MINUTES
     # API_ADMIN_PANEL_ORIGIN is required for WebAuthn (e.g. https://admin.example.com)
     JWT_SECRET: SecretStr = Field(
-        SecretStr('changeme-please-set-a-real-secret-in-env-min-32-chars'),
-        description='Secret key for signing Admin JWT tokens'
+        ...,
+        description='Secret key for signing Admin JWT tokens. Required; must be '
+                    'at least 32 characters and must not be a placeholder.'
     )
     JWT_ALGORITHM: str = Field('HS256', description='JWT signing algorithm')
     JWT_EXPIRE_MINUTES: int = Field(480, ge=5, description='Admin JWT lifetime in minutes (default 8h)')
     ADMIN_PANEL_ORIGIN: str | None = Field(
         None, description='Origin for WebAuthn RP (e.g. https://admin.example.com). Required for passkey endpoints.'
     )
+
+    @field_validator('JWT_SECRET')
+    @classmethod
+    def _validate_jwt_secret(cls, value: SecretStr) -> SecretStr:
+        """
+        Reject a missing, placeholder or too-short admin JWT secret at startup.
+
+        Booting on a weak secret is worse than not booting at all: the admin
+        JWT is the only thing standing between the public internet and every
+        RBAC-protected endpoint, including payment processing.
+        """
+        secret = value.get_secret_value().strip()
+
+        if not secret:
+            raise ValueError(
+                'API_JWT_SECRET is not set. Generate one with '
+                '`python -c "import secrets; print(secrets.token_hex(32))"` '
+                'and add it to .env.'
+            )
+
+        if secret in JWT_SECRET_PLACEHOLDERS:
+            raise ValueError(
+                'API_JWT_SECRET is still the placeholder value from the '
+                'repository. It is publicly known; generate a real secret.'
+            )
+
+        if len(secret) < JWT_SECRET_MIN_LENGTH:
+            raise ValueError(
+                f'API_JWT_SECRET must be at least {JWT_SECRET_MIN_LENGTH} '
+                f'characters (got {len(secret)}).'
+            )
+
+        return value
 
 
 class GoogleSheetsConfig(BaseSettings):

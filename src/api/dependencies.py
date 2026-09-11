@@ -233,17 +233,25 @@ class AdminJWTPayload(BaseModel):
 
 async def get_admin_from_jwt(
     request: Request,
-    redis: Redis = Depends(get_redis)
+    redis: Redis = Depends(get_redis),
+    session: AsyncSession = Depends(get_db),
 ) -> AdminJWTPayload:
     """
     Validates Admin JWT from the ``X-Admin-Authorization: Bearer <token>`` header.
 
-    Checks the Redis JTI blocklist to ensure the token has not been revoked.
+    Signature and expiry are checked first, then the Redis JTI blocklist, then
+    the admin's *current* account state.  The last step matters: a token stays
+    cryptographically valid for ``API_JWT_EXPIRE_MINUTES`` (8 hours by default),
+    so a deactivated, deleted or demoted admin would otherwise keep the
+    privileges frozen into their token until it expired.  The role used for
+    authorisation therefore comes from the database, never from the token.
+
     Returns an ``AdminJWTPayload`` on success; raises 401 on any auth failure.
     """
     from src.config import config
     from src.api.utils.admin_jwt import decode_admin_token
     from src.infrastructure.cache.keys import CacheKeys
+    from src.infrastructure.services.admin_identity_service import AdminIdentityService
 
     auth_header = request.headers.get("X-Admin-Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -273,10 +281,38 @@ async def get_admin_from_jwt(
             headers={"WWW-Authenticate": "Bearer"},
         )
         
+    admin_id = int(payload["sub"])
+
+    # 3. Enforce live account state — the token's own claims are a snapshot
+    #    taken at login and cannot reflect a later dismissal or demotion.
+    identity = await AdminIdentityService.get(redis, session, admin_id)
+
+    if identity is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin account no longer exists",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not identity.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin account is deactivated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if identity.role_name != payload["role"]:
+        logger.info(
+            "Admin %s presented a token for role %r; using current role %r",
+            admin_id, payload["role"], identity.role_name,
+        )
+
     admin_payload = AdminJWTPayload(
-        admin_id=int(payload["sub"]),
-        role_name=payload["role"],
+        # Authoritative: read from the database, not from the token.
+        role_name=identity.role_name,
+        admin_id=admin_id,
         jti=jti,
+        # Frontend-only hints; never consulted for authorisation.
         home_page=payload.get("home_page"),
         permissions=payload.get("permissions") or [],
     )
