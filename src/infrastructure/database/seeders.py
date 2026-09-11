@@ -37,8 +37,9 @@ _PERMISSION_DEFINITIONS: dict[str, list[str]] = {
     # Audit log access — read-only; write is performed by the system internally.
     "audit_logs":      ["read"],
     # clients:finance_read  →  GET  /admin/clients/{id}/finances + payment-detail + flights
-    # clients:finance_update is reserved for future balance correction endpoints.
-    "clients":        ["read", "verify", "update", "ban", "finance_read", "finance_update"],
+    # clients:finance_update  →  balance adjustments on PUT /clients/{id}
+    # clients:delete          →  DELETE /clients/{id} (hard delete)
+    "clients":        ["read", "verify", "update", "ban", "finance_read", "finance_update", "delete"],
     "cargo":          ["read", "create", "update", "delete"],
     "payments":       ["read", "approve", "reject", "export"],
     "flights":        ["read", "create", "update", "delete"],
