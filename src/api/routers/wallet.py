@@ -1,7 +1,7 @@
 """
 Wallet API Router.
 
-Exposes wallet operations (balance, cards, refund, debt) as REST endpoints.
+Exposes wallet operations (balance, cards, company card, refund, debt) as REST endpoints.
 Replicates logic from src/bot/handlers/user/wallet.py.
 Critical: refund and debt endpoints send Telegram notifications with inline approval buttons.
 """
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.api.dependencies import get_db, get_current_user, get_translator
+from src.api.schemas.payment import ActiveCardResponse
 from src.api.schemas.wallet import (
     WalletBalanceResponse,
     PaymentReminderItem,
@@ -26,6 +27,7 @@ from src.api.schemas.wallet import (
 from src.bot.bot_instance import bot
 from src.config import config
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
+from src.infrastructure.database.dao.payment_card import PaymentCardDAO
 from src.infrastructure.database.dao.user_payment_card import UserPaymentCardDAO
 from src.infrastructure.services.user_payment_card import UserPaymentCardService
 from src.infrastructure.database.models.client import Client
@@ -445,3 +447,40 @@ async def pay_debt(
         )
 
     return MessageResponse(message="Debt payment receipt submitted successfully")
+
+
+# ==================== 7. Company Card ====================
+
+@router.get(
+    "/company-card",
+    response_model=ActiveCardResponse,
+    summary="Get a company payment card",
+    description="Returns a random active company card for the user to pay into.",
+)
+async def get_company_card(
+    session: AsyncSession = Depends(get_db),
+    current_user: Client = Depends(get_current_user),
+) -> ActiveCardResponse:
+    """
+    Get a random active company payment card for the authenticated user.
+
+    User-facing counterpart of GET /payments/active-cards/random, which is
+    admin-only (pos:read). The 404 detail has the same shape as that endpoint's.
+    """
+    card = await PaymentCardDAO.get_random_active(session)
+
+    if not card:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "No active payment cards found",
+                "error_code": "NO_ACTIVE_CARDS",
+                "details": None,
+            },
+        )
+
+    return ActiveCardResponse(
+        card_number=card.card_number,
+        holder_name=card.full_name,
+        bank_name=None,
+    )
