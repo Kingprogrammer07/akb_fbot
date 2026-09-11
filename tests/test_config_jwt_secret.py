@@ -49,6 +49,17 @@ def test_long_secret_is_accepted():
     assert build(secret).JWT_SECRET.get_secret_value() == secret
 
 
+def test_surrounding_whitespace_is_stripped_from_the_signing_key() -> None:
+    """
+    The strength checks run on the stripped secret, so the stripped secret is
+    the one that must be used for signing.  Keeping the padding would sign
+    tokens with a key other than the one that was validated.
+    """
+    padded = f"  {VALID_SECRET}\n"
+
+    assert build(padded).JWT_SECRET.get_secret_value() == VALID_SECRET
+
+
 def test_there_is_no_usable_default(monkeypatch):
     """
     The field must have no fallback at all: an unset ``API_JWT_SECRET`` has to

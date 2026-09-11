@@ -15,6 +15,7 @@ Threading note: aiogram + FastAPI run on a single asyncio loop, so a plain
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +33,38 @@ class PartnerNotFoundError(LookupError):
     """Raised when a ``client_code`` cannot be matched to any partner."""
 
 
+@dataclass(frozen=True, slots=True)
+class PartnerSnapshot:
+    """Routing columns of an active :class:`Partner`, independent of any session.
+
+    The resolver cache is process-wide and outlives the session that filled
+    it.  An ORM instance stays bound to its loading session: that session's
+    rollback (or a commit with ``expire_on_commit``) expires it and its close
+    detaches it, so every later reader would fail.  Snapshots hold plain
+    values, and being frozen, one caller cannot change another's routing.
+    """
+
+    id: int
+    code: str
+    display_name: str
+    prefix: str
+    group_chat_id: int | None
+    is_dm_partner: bool
+    is_active: bool
+
+    @classmethod
+    def from_model(cls, partner: Partner) -> PartnerSnapshot:
+        return cls(
+            id=partner.id,
+            code=partner.code,
+            display_name=partner.display_name,
+            prefix=partner.prefix,
+            group_chat_id=partner.group_chat_id,
+            is_dm_partner=partner.is_dm_partner,
+            is_active=partner.is_active,
+        )
+
+
 class PartnerResolver:
     """Cached prefix-to-partner lookup.
 
@@ -40,8 +73,8 @@ class PartnerResolver:
 
     def __init__(self) -> None:
         # Primary prefixes plus every ``partner_prefix_aliases`` row.
-        self._by_prefix: dict[str, Partner] = {}
-        self._by_code: dict[str, Partner] = {}
+        self._by_prefix: dict[str, PartnerSnapshot] = {}
+        self._by_code: dict[str, PartnerSnapshot] = {}
         # Prefixes sorted by length descending so longest-prefix-match
         # (e.g. ``GGX`` beats ``G``) is a single linear scan.
         self._prefixes_lpm: list[str] = []
@@ -52,7 +85,10 @@ class PartnerResolver:
     # ------------------------------------------------------------------
 
     async def _load(self, session: AsyncSession) -> None:
-        partners = await PartnerDAO.get_all_active(session)
+        partners = [
+            PartnerSnapshot.from_model(model)
+            for model in await PartnerDAO.get_all_active(session)
+        ]
         by_prefix = {p.prefix.upper(): p for p in partners}
         by_id = {p.id: p for p in partners}
 
@@ -103,8 +139,8 @@ class PartnerResolver:
 
     async def resolve_by_client_code(
         self, session: AsyncSession, client_code: str
-    ) -> Partner:
-        """Return the :class:`Partner` for a given ``client_code``.
+    ) -> PartnerSnapshot:
+        """Return the :class:`PartnerSnapshot` for a given ``client_code``.
 
         Uses **longest-prefix matching**: the partner whose ``prefix``
         is the longest string that ``client_code`` starts with wins.
@@ -134,7 +170,7 @@ class PartnerResolver:
             )
         return partner
 
-    def _match_lpm(self, normalised_code: str) -> Partner | None:
+    def _match_lpm(self, normalised_code: str) -> PartnerSnapshot | None:
         for prefix in self._prefixes_lpm:
             if normalised_code.startswith(prefix):
                 return self._by_prefix[prefix]
@@ -142,11 +178,11 @@ class PartnerResolver:
 
     async def get_by_code(
         self, session: AsyncSession, partner_code: str
-    ) -> Partner | None:
+    ) -> PartnerSnapshot | None:
         await self._ensure_loaded(session)
         return self._by_code.get(partner_code.strip().upper())
 
-    async def all_active(self, session: AsyncSession) -> list[Partner]:
+    async def all_active(self, session: AsyncSession) -> list[PartnerSnapshot]:
         await self._ensure_loaded(session)
         return list(self._by_code.values())
 

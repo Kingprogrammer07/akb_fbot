@@ -209,14 +209,28 @@ class RedisConfig(BaseSettings):
     PASSWORD: SecretStr | None = None
     TTL: int | None = Field(3600, description='Default TTL in seconds')
     MAX_CONNECTIONS: int = Field(10)
+    # Bound every Redis round trip so an unreachable server fails requests
+    # instead of hanging them. Blocking commands (BLPOP, pub/sub, locks) would
+    # need a longer read timeout; the application issues none.
+    SOCKET_TIMEOUT: float = Field(
+        5.0, gt=0, allow_inf_nan=False, description='Seconds to wait for a Redis reply'
+    )
+    SOCKET_CONNECT_TIMEOUT: float = Field(
+        5.0, gt=0, allow_inf_nan=False, description='Seconds to wait to connect to Redis'
+    )
 
     @property
     def dsn(self) -> str:
-        credentials = ''
+        """
+        Redis URL, with credentials as ``username:password@`` when configured.
+
+        Both parts are percent-encoded with ``safe=''``: the default keeps
+        ``/``, which would end the URL authority inside the secret.
+        """
+        credentials = quote(self.USERNAME or '', safe='')
         if self.PASSWORD:
-            credentials += f':{quote(self.PASSWORD.get_secret_value())}'
-        if self.USERNAME:
-            credentials += quote(self.USERNAME)
+            password = quote(self.PASSWORD.get_secret_value(), safe='')
+            credentials += f':{password}'
         if credentials:
             credentials += '@'
         return f'redis://{credentials}{self.HOST}:{self.PORT}/{self.DB}'
@@ -290,6 +304,9 @@ class APIConfig(BaseSettings):
         Booting on a weak secret is worse than not booting at all: the admin
         JWT is the only thing standing between the public internet and every
         RBAC-protected endpoint, including payment processing.
+
+        The stripped value is what gets returned, so tokens are signed with
+        exactly the key that passed these checks.
         """
         secret = value.get_secret_value().strip()
 
@@ -312,7 +329,7 @@ class APIConfig(BaseSettings):
                 f'characters (got {len(secret)}).'
             )
 
-        return value
+        return SecretStr(secret)
 
 
 class GoogleSheetsConfig(BaseSettings):

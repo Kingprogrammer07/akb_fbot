@@ -245,7 +245,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         """
         Log request to database (non-blocking, safe).
         
-        Must never raise exceptions - failures are silently logged.
+        A failed write is logged, never raised; cancellation still propagates.
         """
         try:
             # Get database client from app state
@@ -273,8 +273,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 except Exception as e:
                     await session.rollback()
                     logger.warning(f"Failed to log request to database: {e}", exc_info=True)
-                finally:
-                    break  # Only use first session
+                # Outside ``finally``: a break there would swallow CancelledError.
+                break  # Only use first session
                     
         except Exception as e:
             # Silent failure - request logging must never break main flow
