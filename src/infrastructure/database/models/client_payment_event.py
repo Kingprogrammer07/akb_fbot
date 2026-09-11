@@ -91,8 +91,8 @@ class ClientPaymentEvent(Base):
     )
 
     # Indexes for efficient queries
+    # (transaction_id and payment_card_id are indexed inline via index=True)
     __table_args__ = (
-        Index('ix_client_payment_events_transaction_id', 'transaction_id'),
         Index('ix_client_payment_events_created_at', 'created_at'),
     )
     
