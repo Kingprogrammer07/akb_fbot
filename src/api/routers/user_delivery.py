@@ -263,6 +263,8 @@ async def get_delivery_history(
     
     # Mask flight names in history — never render the real name, so an
     # entry with no resolvable mask degrades to the generic placeholder.
+    # ``flight_names`` stores the normalised ``/request/*`` bodies, i.e. user
+    # input, so an alias is never minted from it.
     display = await FlightDisplay.for_client(session, client.active_codes)
     for req in requests:
         if req.flight_names:
@@ -334,7 +336,11 @@ async def get_paid_flights(
             merged_flight_names.append(flight_name)
 
     paid_flights: list[FlightItem] = []
-    display = await FlightDisplay.for_client(session, client.active_codes)
+    # Every candidate was read from this client's own Sheets or DB rows, so a
+    # paid flight without an alias gets one minted.
+    display = await FlightDisplay.for_client(
+        session, client.active_codes, mint_missing=True
+    )
 
     for flight_name in merged_flight_names:
         is_paid = await ClientTransactionDAO.check_payment_exists(
@@ -346,8 +352,9 @@ async def get_paid_flights(
             continue
         # ``flight_name`` is the identifier the frontend sends back to
         # ``/request/*``, which resolves it via ``mask_to_real``.  A
-        # placeholder would not round-trip, so a flight with no mask is
-        # omitted rather than offered as an unusable (or leaking) entry.
+        # placeholder would not round-trip, so a flight that still has no
+        # mask (no partner, or a name too long for an alias) is omitted
+        # rather than offered as an unusable (or leaking) entry.
         masked = await display.mask(session, flight_name)
         if not masked:
             logger.warning(

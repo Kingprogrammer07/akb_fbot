@@ -12,12 +12,66 @@ from src.api.schemas.cargo import (
 )
 from src.api.utils.authz import assert_owns_client_code
 from src.infrastructure.services.cargo_item import CargoItemService
+from src.infrastructure.services.flight_display import (
+    FlightDisplay,
+    parse_flight_ordinal,
+    resolve_partner_for_codes,
+)
+from src.infrastructure.services.flight_mask import FlightMaskService
 from src.infrastructure.database.models.client import Client
+from src.infrastructure.database.models.partner import Partner
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.bot.utils.google_sheets_checker import GoogleSheetsChecker
 
 router = APIRouter(prefix="/cargo", tags=["cargo"])
+
+
+async def _real_flight_name(
+    session: AsyncSession, partner: Partner | None, requested_flight: str
+) -> str:
+    """Translate a flight the caller sent (normally its mask) to the real name.
+
+    Unknown input comes back unchanged, so it can only narrow a lookup that is
+    already scoped to the caller's codes; it is never minted into an alias.
+    """
+    if partner is None:
+        return requested_flight
+    return await FlightMaskService.normalize_flight_input(
+        session, partner.id, requested_flight
+    )
+
+
+async def _mask_item_flights(
+    session: AsyncSession, display: FlightDisplay, items: list[dict]
+) -> list[dict]:
+    """Copy cargo item dicts with each real ``flight_name`` replaced by its mask."""
+    return [
+        {**item, "flight_name": await display.mask(session, item["flight_name"])}
+        for item in items
+    ]
+
+
+async def _real_flight_for_details(
+    session: AsyncSession,
+    partner: Partner | None,
+    client_code: str,
+    requested_flight: str,
+) -> str:
+    """Translate the flight the history list showed back to its real name.
+
+    The list shows a mask, or ``Reys #N`` for the N-th flight when there is
+    none (a client without a partner), so such a label is looked up by its
+    position in the same list.
+    """
+    ordinal = parse_flight_ordinal(requested_flight)
+    if ordinal is not None:
+        summaries = await CargoItemService().get_flight_summaries_for_client(
+            client_code, session
+        )
+        if ordinal <= len(summaries) and summaries[ordinal - 1]["flight_name"] is not None:
+            return summaries[ordinal - 1]["flight_name"]
+    return await _real_flight_name(session, partner, requested_flight)
 
 
 @router.get(
@@ -56,8 +110,15 @@ async def track_cargo(
         clean_track_code, session, allowed_client_codes=set(current_user.active_codes)
     )
     
+    # The items are the caller's own rows, so a flight without an alias yet is
+    # given one instead of being shown by its real name.
+    display = await FlightDisplay.for_client(
+        session, current_user.active_codes, mint_missing=True
+    )
+    masked_items = await _mask_item_flights(session, display, results['items'])
+
     # Transform results to Pydantic models
-    items = [CargoItemResponse(**item) for item in results['items']]
+    items = [CargoItemResponse(**item) for item in masked_items]
     
     return TrackCodeSearchResponse(
         found=results['found'],
@@ -88,9 +149,14 @@ async def check_flight_status(
     2. Local Database: Does the client have a FlightCargo record for this flight?
     3. Sent Status: If in DB, is it marked as sent?
     """
-    clean_flight = flight_name.strip().upper()
+    requested_flight = flight_name.strip()
     clean_client = client_code.strip().upper()
     assert_owns_client_code(current_user, clean_client)
+
+    # The web app sends the mask it was shown; the lookups need the real name.
+    partner = await resolve_partner_for_codes(session, current_user.active_codes)
+    real_flight = await _real_flight_name(session, partner, requested_flight)
+    clean_flight = real_flight.upper()
 
     # 1. Check Google Sheets
     sheets_checker = GoogleSheetsChecker(
@@ -150,8 +216,18 @@ async def check_flight_status(
         if transaction.taken_away_date:
             taken_away_date = transaction.taken_away_date.isoformat()
 
+    # The flight came from the request, so no alias is minted for it.  Only a
+    # flight the caller has cargo in is shown by its mask: masking any name
+    # would let a caller probe which real flight names its partner uses.
+    # Anything else is echoed as sent, which reveals nothing new.
+    shown_flight = requested_flight
+    if exists_in_sheets or exists_in_db or transaction is not None:
+        shown_flight = (
+            await FlightDisplay(partner).mask(session, real_flight) or shown_flight
+        )
+
     return FlightStatusResponse(
-        flight_name=clean_flight,
+        flight_name=shown_flight,
         client_code=clean_client,
         exists_in_sheets=exists_in_sheets,
         exists_in_db=exists_in_db,
@@ -161,8 +237,10 @@ async def check_flight_status(
     )
 
 
+# Client codes contain "/" (A01-1/1, A80/1) and the web app sends them unencoded, so
+# both history routes capture the code as a ``path`` segment, like routers/reports.py.
 @router.get(
-    "/history/{client_code}/flights",
+    "/history/{client_code:path}/flights",
     response_model=list[ClientFlightSummary],
     summary="Get client flight history",
     description="Returns a summary list of all flights for this client."
@@ -185,12 +263,22 @@ async def get_client_flight_history(
     clean_client = client_code.strip().upper()
     assert_owns_client_code(current_user, clean_client)
     service = CargoItemService()
+    summaries = await service.get_flight_summaries_for_client(clean_client, session)
 
-    return await service.get_flight_summaries_for_client(clean_client, session)
+    # Grouped from the caller's own rows, so a flight without an alias yet is
+    # given one.  The ordinal keeps entries apart for a client with no partner.
+    display = await FlightDisplay.for_client(
+        session, current_user.active_codes, mint_missing=True
+    )
+    for ordinal, summary in enumerate(summaries, start=1):
+        summary["flight_name"] = await display.label(
+            session, summary["flight_name"], ordinal=ordinal
+        )
+    return summaries
 
 
 @router.get(
-    "/history/{client_code}/flights/{flight_name}",
+    "/history/{client_code:path}/flights/{flight_name}",
     response_model=ClientFlightDetailResponse,
     summary="Get detailed flight cargo",
     description="Returns detailed cargo items for the specific flight and client."
@@ -212,14 +300,23 @@ async def get_flight_details(
     """
     clean_client = client_code.strip().upper()
     assert_owns_client_code(current_user, clean_client)
-    clean_flight = flight_name.strip()
+    # The path carries the label from the flight list; the lookup needs the real name.
+    partner = await resolve_partner_for_codes(session, current_user.active_codes)
+    clean_flight = await _real_flight_for_details(
+        session, partner, clean_client, flight_name.strip()
+    )
     
     service = CargoItemService()
     
-    return await service.get_flight_details_for_client(
+    details = await service.get_flight_details_for_client(
         clean_client, 
         clean_flight, 
         page, 
         size, 
         session
     )
+    # Every item is one of the caller's own rows and carries that row's flight
+    # name, so a missing alias is minted; the request string never is.
+    display = FlightDisplay(partner, mint_missing=True)
+    details["items"] = await _mask_item_flights(session, display, details["items"])
+    return details

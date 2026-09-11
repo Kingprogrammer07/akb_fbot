@@ -205,13 +205,17 @@ async def _apply_flight_mask(
     """Mutate ``items`` in place, replacing ``flight_name`` with the partner mask.
 
     The user's owning partner is resolved from any of their ``active_codes``.
-    A row whose mask cannot be resolved (unknown partner, or a track code
-    shared from another partner's cargo) is blanked to
-    :data:`FLIGHT_PLACEHOLDER` — the real flight name is never rendered.
+    ``items`` come from a lookup scoped to those same codes, so every flight
+    name was read from the client's own cargo rows and a missing alias is
+    minted.  A row still left without a mask (the client has no partner, or
+    the name is blank) is blanked to :data:`FLIGHT_PLACEHOLDER` — the real
+    flight name is never rendered.
     """
     if not items:
         return
-    display = await FlightDisplay.for_client(session, client.active_codes)
+    display = await FlightDisplay.for_client(
+        session, client.active_codes, mint_missing=True
+    )
 
     for item in items:
         if not item.get("flight_name"):

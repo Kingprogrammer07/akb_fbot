@@ -14,12 +14,18 @@ from src.bot.filters.is_private_chat import IsPrivate
 from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.keyboards.inline_kb.auth import auth_login_kb
 from src.bot.utils.decorators import handle_errors
+from src.bot.utils.flight_token import (
+    client_token_scope,
+    flight_token,
+    resolve_flight_token,
+)
 from src.bot.utils.sheets_cache import get_client_sheets_data
 from src.bot.utils.currency_cache import convert_to_uzs
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.expected_cargo import ExpectedFlightCargoDAO
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
 from src.infrastructure.database.dao.static_data import StaticDataDAO
+from src.infrastructure.database.models.client import Client
 from src.infrastructure.services import (
     ClientService,
     PaymentCardService,
@@ -86,15 +92,81 @@ async def _resolve_mask(
     """Return the partner-specific mask, or ``None`` when there can be none.
 
     Thin wrapper over :func:`flight_mask_for_client` so every call site in
-    this module keeps reading the same way.  Never returns the real flight
-    name: callers either drop the flight clause or render
-    :data:`FLIGHT_PLACEHOLDER`.
+    this module keeps reading the same way.  Every caller passes a flight
+    from the client's own records (its sheet / expected-cargo flights, its
+    transactions, or the FSM flight resolved from them), so a missing alias
+    is minted and ``None`` is left for a client without a partner.  Never
+    returns the real flight name: callers either drop the flight clause or
+    render :data:`FLIGHT_PLACEHOLDER`.
     """
     if not client:
         return None
     return await flight_mask_for_client(
-        session, client.active_codes, real_flight_name
+        session, client.active_codes, real_flight_name, mint_missing=True
     )
+
+
+async def _collect_flight_matches(
+    session: AsyncSession, client: Client, redis: Redis
+) -> list[dict]:
+    """Sheets matches plus DB-only flights (``expected_flight_cargos``), deduplicated."""
+    sheets_result = await get_client_sheets_data(client.active_codes, redis)
+    sheets_matches: list[dict] = sheets_result.get("matches", []) if sheets_result.get("found") else []
+
+    # Merge with flights from expected_flight_cargos DB so DB-only flights are also offered
+    db_flight_names = await ExpectedFlightCargoDAO.get_distinct_flights_for_client(
+        session, client.active_codes
+    )
+    seen_keys: set[str] = set()
+    merged_matches: list[dict] = []
+    for match in sheets_matches:
+        key = match["flight_name"].strip().upper()
+        if key not in seen_keys:
+            seen_keys.add(key)
+            merged_matches.append(match)
+    for flight_name in db_flight_names:
+        key = flight_name.strip().upper()
+        if key not in seen_keys:
+            seen_keys.add(key)
+            # row_number is stored but never rendered — use 0 as sentinel for DB-sourced flights
+            merged_matches.append({"flight_name": flight_name, "row_number": 0})
+    return merged_matches
+
+
+async def _client_payable_flights(
+    session: AsyncSession, client: Client, redis: Redis
+) -> list[str]:
+    """Every flight a ``pay_flight:`` button may name for this client.
+
+    Those buttons come from the payment list and the info screen (both built
+    from the client's sheet / expected-cargo flights) and from the
+    partial-payment reminder (the client's own transactions).
+    """
+    matches = await _collect_flight_matches(session, client, redis)
+    flights = [match["flight_name"] for match in matches]
+    flights.extend(
+        await ClientTransactionDAO.get_unique_flights_by_telegram_id(
+            session, client.telegram_id
+        )
+    )
+    return flights
+
+
+def _worksheet_flight(
+    data: dict[str, object], token: str, scope: str
+) -> str | None:
+    """Resolve a payment-step token against the flight this FSM flow is paying.
+
+    ``worksheet`` is written only by :func:`payment_flight_selected`, after its
+    token was checked against the client's own flights.  Binding every later
+    step to it stops a stale button from an earlier message, or a payload
+    naming another flight, from retargeting a payment whose amount is already
+    held in the FSM.
+    """
+    worksheet = data.get("worksheet")
+    if not isinstance(worksheet, str):
+        return None
+    return resolve_flight_token(token, [worksheet], scope)
 
 
 async def _get_existing_tx(session: AsyncSession, active_codes, flight_name: str):
@@ -169,11 +241,15 @@ def _add_wallet_toggle_button(
     wallet_balance: float,
     use_wallet: bool,
     flight_name: str,
+    scope: str,
     _: callable,
 ):
     if wallet_balance > 0:
         label = _("btn-payment-wallet-enabled") if use_wallet else _("btn-payment-use-wallet")
-        builder.button(text=label, callback_data=f"payment_wallet_toggle:{flight_name}")
+        builder.button(
+            text=label,
+            callback_data=f"payment_wallet_toggle:{flight_token(flight_name, scope)}",
+        )
 
 
 async def calculate_flight_payment(
@@ -272,26 +348,7 @@ async def make_payment_handler(
         await message.answer(_("error-occurred"))
         return
 
-    sheets_result = await get_client_sheets_data(client.active_codes, redis)
-    sheets_matches: list[dict] = sheets_result.get("matches", []) if sheets_result.get("found") else []
-
-    # Merge with flights from expected_flight_cargos DB so DB-only flights are also offered
-    db_flight_names = await ExpectedFlightCargoDAO.get_distinct_flights_for_client(
-        session, client.active_codes
-    )
-    seen_keys: set[str] = set()
-    merged_matches: list[dict] = []
-    for match in sheets_matches:
-        key = match["flight_name"].strip().upper()
-        if key not in seen_keys:
-            seen_keys.add(key)
-            merged_matches.append(match)
-    for flight_name in db_flight_names:
-        key = flight_name.strip().upper()
-        if key not in seen_keys:
-            seen_keys.add(key)
-            # row_number is stored but never rendered — use 0 as sentinel for DB-sourced flights
-            merged_matches.append({"flight_name": flight_name, "row_number": 0})
+    merged_matches = await _collect_flight_matches(session, client, redis)
 
     if not merged_matches:
         await message.answer(_("payment-no-orders"))
@@ -319,11 +376,13 @@ async def make_payment_handler(
         await message.answer(_("payment-all-paid"))
         return
 
+    scope = client_token_scope(client.id)
     builder = InlineKeyboardBuilder()
     for idx, flight in enumerate(available_flights, start=1):
         flight_name = flight["flight_name"]
-        # When the partner has not configured a mask, fall back to a
-        # generic ordinal label so the real flight name is never leaked.
+        # A missing alias was minted, so no mask means the client has no
+        # partner: fall back to a generic ordinal label so the real flight
+        # name is never leaked.
         display = flight["masked_flight"] or f"Reys #{idx}"
         total_payment = flight["total_payment"]
         existing_tx = flight["existing_tx"]
@@ -347,7 +406,9 @@ async def make_payment_handler(
             label = _("info-report-not-sent")
             button_text = f"✈️ {display} - {label}"
 
-        builder.button(text=button_text, callback_data=f"pay_flight:{flight_name}")
+        builder.button(
+            text=button_text, callback_data=f"pay_flight:{flight_token(flight_name, scope)}"
+        )
 
     builder.adjust(1)
     await message.answer(_("payment-select-flight"), reply_markup=builder.as_markup())
@@ -376,13 +437,19 @@ async def payment_flight_selected(
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
+    scope = client_token_scope(client.id)
+    flight_name = resolve_flight_token(
+        parts[1], await _client_payable_flights(session, client, redis), scope
+    )
+    if flight_name is None:
+        await callback.answer(_("error-occurred"), show_alert=True)
+        return
 
     payment_data = await calculate_flight_payment(session, flight_name, client.active_codes, redis)
 
     if not payment_data:
-        # Hide the real flight name entirely when no mask alias has been
-        # configured for this client's partner; otherwise show the mask.
+        # Show the mask (minted when missing); a client without a partner
+        # has none, and then the flight clause is dropped entirely.
         masked = await _resolve_mask(session, client, flight_name)
         flight_line = (
             f"✈️ Reys: <b>{masked}</b>\n" if masked else ""
@@ -418,9 +485,10 @@ async def payment_flight_selected(
         final_payable_amount=0,
     )
 
+    token = flight_token(flight_name, scope)
     builder = InlineKeyboardBuilder()
-    builder.button(text=_("btn-payment-online"), callback_data=f"payment_type:online:{flight_name}")
-    builder.button(text=_("btn-payment-cash"), callback_data=f"payment_type:cash:{flight_name}")
+    builder.button(text=_("btn-payment-online"), callback_data=f"payment_type:online:{token}")
+    builder.button(text=_("btn-payment-cash"), callback_data=f"payment_type:cash:{token}")
     builder.adjust(1)
 
     await callback.message.answer(_("payment-select-type"), reply_markup=builder.as_markup())
@@ -442,15 +510,15 @@ async def payment_type_online_selected(
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[2]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
+    scope = client_token_scope(client.id)
     data = await state.get_data()
-    if not data:
+    flight_name = _worksheet_flight(data, parts[2], scope)
+    if flight_name is None:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
@@ -464,14 +532,17 @@ async def payment_type_online_selected(
         message_text = _("payment-online-partial", remaining=f"{remaining:,.2f}")
         builder.button(
             text=_("btn-pay-full-remaining", amount=f"{remaining:,.2f}"),
-            callback_data=f"pay_full_remaining:{flight_name}",
+            callback_data=f"pay_full_remaining:{flight_token(flight_name, scope)}",
         )
         builder.button(text=_("btn-cancel"), callback_data="payment_cancel")
     else:
         message_text = _("payment-online-options")
-        builder.button(text=_("btn-pay-full"), callback_data=f"pay_full:{flight_name}")
+        builder.button(text=_("btn-pay-full"), callback_data=f"pay_full:{flight_token(flight_name, scope)}")
         if total_payment >= 25000:
-            builder.button(text=_("btn-pay-partial"), callback_data=f"pay_partial:{flight_name}")
+            builder.button(
+                text=_("btn-pay-partial"),
+                callback_data=f"pay_partial:{flight_token(flight_name, scope)}",
+            )
         builder.button(text=_("btn-cancel"), callback_data="payment_cancel")
 
     builder.adjust(1)
@@ -493,15 +564,15 @@ async def payment_type_cash_selected(
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[2]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
+    scope = client_token_scope(client.id)
     data = await state.get_data()
-    if not data:
+    flight_name = _worksheet_flight(data, parts[2], scope)
+    if flight_name is None:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
@@ -524,8 +595,8 @@ async def payment_type_cash_selected(
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text=_("btn-confirm"), callback_data=f"cash_confirm:{flight_name}")
-    _add_wallet_toggle_button(builder, wallet_balance, False, flight_name, _)
+    builder.button(text=_("btn-confirm"), callback_data=f"cash_confirm:{flight_token(flight_name, scope)}")
+    _add_wallet_toggle_button(builder, wallet_balance, False, flight_name, scope, _)
     builder.button(text=_("btn-cancel"), callback_data="cash_cancel")
     builder.adjust(1)
 
@@ -547,15 +618,15 @@ async def pay_full_handler(
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
+    scope = client_token_scope(client.id)
     data = await state.get_data()
-    if not data:
+    flight_name = _worksheet_flight(data, parts[1], scope)
+    if flight_name is None:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
@@ -587,7 +658,7 @@ async def pay_full_handler(
 
     builder = InlineKeyboardBuilder()
     builder.button(text=_("btn-send-payment-proof"), callback_data="send_payment_proof")
-    _add_wallet_toggle_button(builder, wallet_balance, False, flight_name, _)
+    _add_wallet_toggle_button(builder, wallet_balance, False, flight_name, scope, _)
     builder.adjust(1)
 
     await callback.message.edit_text(payment_info, reply_markup=builder.as_markup())
@@ -609,10 +680,15 @@ async def pay_full_remaining_handler(
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
+        await callback.answer(_("error-occurred"), show_alert=True)
+        return
+
+    scope = client_token_scope(client.id)
+    data = await state.get_data()
+    flight_name = _worksheet_flight(data, parts[1], scope)
+    if flight_name is None:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
@@ -623,11 +699,6 @@ async def pay_full_remaining_handler(
 
     card = await _get_random_card(session, callback, _)
     if not card:
-        return
-
-    data = await state.get_data()
-    if not data:
-        await callback.answer(_("error-occurred"), show_alert=True)
         return
 
     remaining = _parse_decimal(existing_tx.remaining_amount)
@@ -657,7 +728,7 @@ async def pay_full_remaining_handler(
 
     builder = InlineKeyboardBuilder()
     builder.button(text=_("btn-send-payment-proof"), callback_data="send_payment_proof")
-    _add_wallet_toggle_button(builder, wallet_balance, False, flight_name, _)
+    _add_wallet_toggle_button(builder, wallet_balance, False, flight_name, scope, _)
     builder.adjust(1)
 
     await callback.message.edit_text(payment_info, reply_markup=builder.as_markup())
@@ -679,15 +750,15 @@ async def pay_partial_handler(
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
+    scope = client_token_scope(client.id)
     data = await state.get_data()
-    if not data:
+    flight_name = _worksheet_flight(data, parts[1], scope)
+    if flight_name is None:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
@@ -721,7 +792,10 @@ async def pay_partial_handler(
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text=_("btn-enter-amount"), callback_data=f"enter_partial_amount:{flight_name}")
+    builder.button(
+        text=_("btn-enter-amount"),
+        callback_data=f"enter_partial_amount:{flight_token(flight_name, scope)}",
+    )
     builder.button(text=_("btn-cancel"), callback_data="payment_cancel")
     builder.adjust(1)
 
@@ -731,7 +805,11 @@ async def pay_partial_handler(
 
 @make_payment_router.callback_query(F.data.startswith("enter_partial_amount:"))
 async def enter_partial_amount_handler(
-    callback: CallbackQuery, _: callable, state: FSMContext
+    callback: CallbackQuery,
+    _: callable,
+    session: AsyncSession,
+    client_service: ClientService,
+    state: FSMContext,
 ):
     """Activate state to receive partial payment amount."""
     parts = callback.data.split(":")
@@ -739,7 +817,18 @@ async def enter_partial_amount_handler(
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
+    client = await client_service.get_client(callback.from_user.id, session)
+    if not client:
+        await callback.answer(_("error-occurred"), show_alert=True)
+        return
+
+    flight_name = _worksheet_flight(
+        await state.get_data(), parts[1], client_token_scope(client.id)
+    )
+    if flight_name is None:
+        await callback.answer(_("error-occurred"), show_alert=True)
+        return
+
     await state.update_data(payment_mode="partial", partial_flight=flight_name, partial_row=0)
     await state.set_state(PaymentStates.waiting_for_partial_amount)
     await callback.message.answer(_("payment-partial-enter-amount"))
@@ -828,36 +917,40 @@ async def partial_amount_received(
 
     builder = InlineKeyboardBuilder()
     builder.button(text=_("btn-send-payment-proof"), callback_data="send_payment_proof")
-    _add_wallet_toggle_button(builder, wallet_balance, False, flight_name, _)
+    _add_wallet_toggle_button(
+        builder, wallet_balance, False, flight_name, client_token_scope(client.id), _
+    )
     builder.adjust(1)
 
     await message.answer(payment_info, reply_markup=builder.as_markup())
 
 
-@make_payment_router.callback_query(F.data.startswith("payment_wallet_toggle:"))
-async def payment_wallet_toggle_handler(
+async def _toggle_wallet(
     callback: CallbackQuery,
     _: callable,
     session: AsyncSession,
     client_service: ClientService,
     state: FSMContext,
-    redis: Redis,
-):
-    """Toggle wallet usage for payment."""
-    await callback.answer()
+) -> str | None:
+    """Flip ``use_wallet`` and redraw the payment screen.
 
+    Returns the alert for a rejected press, or ``None`` once the screen shows
+    the new choice.  The choice is saved only after that redraw, so a no-card
+    return or a failed edit leaves it where the user still sees it.
+    """
     parts = callback.data.split(":")
     if len(parts) != 2:
-        return
-
-    flight_name = parts[1]
-    data = await state.get_data()
-    if not data:
-        return
+        return _("error-occurred")
 
     client = await _get_client_safe(callback.from_user.id, session, client_service)
     if not client:
-        return
+        return _("error-occurred")
+
+    scope = client_token_scope(client.id)
+    data = await state.get_data()
+    flight_name = _worksheet_flight(data, parts[1], scope)
+    if flight_name is None:
+        return _("error-occurred")
 
     use_wallet = not data.get("use_wallet", False)
     wallet_balance = await _get_wallet_balance(session, client.active_codes)
@@ -866,15 +959,10 @@ async def payment_wallet_toggle_handler(
     selected_amount = _resolve_selected_amount(data, total_payment)
     wallet_used, final_payable_amount = _build_wallet_amounts(selected_amount, wallet_balance, use_wallet)
 
-    await state.update_data(
-        use_wallet=use_wallet,
-        wallet_balance=wallet_balance,
-        wallet_used=wallet_used,
-        final_payable_amount=final_payable_amount,
-    )
-
     payment_mode = data.get("payment_mode", "full")
     builder = InlineKeyboardBuilder()
+    # Saved with the rest of the choice, once the screen shows the card.
+    shown_card: dict[str, int] = {}
 
     if payment_mode == "cash":
         if use_wallet and wallet_used > 0 and final_payable_amount <= 0:
@@ -884,7 +972,10 @@ async def payment_wallet_toggle_handler(
                 wallet_deduction=f"{wallet_used:,.2f}",
                 final="0",
             )
-            builder.button(text=_("btn-payment-wallet-only"), callback_data=f"payment_wallet_only:{flight_name}")
+            builder.button(
+                text=_("btn-payment-wallet-only"),
+                callback_data=f"payment_wallet_only:{flight_token(flight_name, scope)}",
+            )
         else:
             display_flight_local = (await _resolve_mask(session, client, flight_name)) or FLIGHT_PLACEHOLDER
             message_text = _(
@@ -896,13 +987,15 @@ async def payment_wallet_toggle_handler(
             )
             if use_wallet and wallet_used > 0:
                 message_text += f"\n\n💰 Hamyondan: {wallet_used:,.2f} so'm\n💵 Naqd to'lanadi: {final_payable_amount:,.2f} so'm"
-            builder.button(text=_("btn-confirm"), callback_data=f"cash_confirm:{flight_name}")
+            builder.button(
+                text=_("btn-confirm"),
+                callback_data=f"cash_confirm:{flight_token(flight_name, scope)}",
+            )
     else:
         card = await PaymentCardService().get_random_active_card(session)
         if not card:
-            await callback.answer(_("payment-no-cards"), show_alert=True)
-            return
-        await state.update_data(shown_card_id=card.id)
+            return _("payment-no-cards")
+        shown_card = {"shown_card_id": card.id}
 
         if use_wallet and wallet_used > 0 and final_payable_amount <= 0:
             message_text = _(
@@ -911,7 +1004,10 @@ async def payment_wallet_toggle_handler(
                 wallet_deduction=f"{wallet_used:,.2f}",
                 final="0",
             )
-            builder.button(text=_("btn-payment-wallet-only"), callback_data=f"payment_wallet_only:{flight_name}")
+            builder.button(
+                text=_("btn-payment-wallet-only"),
+                callback_data=f"payment_wallet_only:{flight_token(flight_name, scope)}",
+            )
         else:
             template_key = {
                 "partial": "payment-info-partial",
@@ -945,10 +1041,42 @@ async def payment_wallet_toggle_handler(
                 )
             builder.button(text=_("btn-send-payment-proof"), callback_data="send_payment_proof")
 
-    _add_wallet_toggle_button(builder, wallet_balance, use_wallet, flight_name, _)
+    _add_wallet_toggle_button(builder, wallet_balance, use_wallet, flight_name, scope, _)
     builder.adjust(1)
 
     await _safe_edit_text(callback, message_text, reply_markup=builder.as_markup())
+    await state.update_data(
+        use_wallet=use_wallet,
+        wallet_balance=wallet_balance,
+        wallet_used=wallet_used,
+        final_payable_amount=final_payable_amount,
+        **shown_card,
+    )
+    return None
+
+
+@make_payment_router.callback_query(F.data.startswith("payment_wallet_toggle:"))
+async def payment_wallet_toggle_handler(
+    callback: CallbackQuery,
+    _: callable,
+    session: AsyncSession,
+    client_service: ClientService,
+    state: FSMContext,
+    redis: Redis,
+):
+    """Toggle wallet usage for payment.
+
+    The callback is answered exactly once, here: Telegram rejects a second
+    answer.  :func:`_toggle_wallet` returns the alert for a rejected press
+    (``None`` on success); when it raises, the generic alert still answers
+    the press and the error then propagates to the webhook route, which
+    logs it.
+    """
+    alert: str | None = _("error-occurred")
+    try:
+        alert = await _toggle_wallet(callback, _, session, client_service, state)
+    finally:
+        await callback.answer(alert, show_alert=alert is not None)
 
 
 @make_payment_router.callback_query(F.data.startswith("payment_wallet_only:"))
@@ -962,19 +1090,24 @@ async def payment_wallet_only_handler(
     redis: Redis,
 ):
     """Handle payment fully covered by wallet balance."""
-    await callback.answer()
-
     parts = callback.data.split(":")
     if len(parts) != 2:
+        await callback.answer(_("error-occurred"), show_alert=True)
         return
-
-    flight_name = parts[1]
 
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
+        await callback.answer(_("error-occurred"), show_alert=True)
         return
 
     data = await state.get_data()
+    flight_name = _worksheet_flight(data, parts[1], client_token_scope(client.id))
+    if flight_name is None:
+        await callback.answer(_("error-occurred"), show_alert=True)
+        return
+
+    await callback.answer()
+
     total_payment = parse_money(data.get("summa", "0"))
     wallet_balance = data.get("wallet_balance", 0)
     vazn = data.get("vazn", "N/A")
@@ -1234,15 +1367,15 @@ async def cash_payment_confirmed(
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
+    scope = client_token_scope(client.id)
     data = await state.get_data()
-    if not data:
+    flight_name = _worksheet_flight(data, parts[1], scope)
+    if flight_name is None:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 

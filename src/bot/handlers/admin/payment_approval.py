@@ -22,13 +22,15 @@ from src.bot.keyboards.user.reply_keyb.user_home_kyb import user_main_menu_kyb
 from src.bot.utils.i18n import i18n
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.client_payment_event import ClientPaymentEventDAO
+from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
+from src.infrastructure.database.models.client import Client
 from src.infrastructure.services import (
     ClientService,
     ClientTransactionService,
     PaymentAllocationService,
 )
 from src.infrastructure.services.flight_display import (
-    flight_label_for_client,
+    FLIGHT_PLACEHOLDER,
     flight_mask_for_client,
 )
 from src.infrastructure.services.admin_identity_service import resolve_admin_pk_by_telegram_id
@@ -96,6 +98,34 @@ def _extract_flight_name(text: str | None) -> str:
 def _user_translator(client, lang_fallback: str = "uz") -> callable:
     lang = client.language_code if client and client.language_code else lang_fallback
     return lambda key, **kw: i18n.get(lang, key, **kw)
+
+
+async def _client_flight_mask(
+    session: AsyncSession, client: Client, flight_name: str
+) -> str | None:
+    """Return the mask ``client`` may see for its payment's flight, else ``None``.
+
+    The flight arrives exactly as it was submitted with the payment - in the
+    approval callback or the staff caption - so it may name a flight the
+    client has no cargo in, or spell an owned one in another case.  An
+    existing alias is used as is.  Otherwise a mask is minted only for a
+    flight the client's own ``flight_cargos`` rows name, and under the name
+    stored there, so a submitted string never becomes an alias.  Never
+    returns the real name.
+    """
+    if not flight_name:
+        return None
+    mask = await flight_mask_for_client(session, client.active_codes, flight_name)
+    if mask is not None:
+        return mask
+    own_cargo = await FlightCargoDAO.get_by_client(
+        session, flight_name, client.active_codes, limit=1
+    )
+    if not own_cargo:
+        return None
+    return await flight_mask_for_client(
+        session, client.active_codes, own_cargo[0].flight_name, mint_missing=True
+    )
 
 
 async def _get_redis_str(redis: Redis, key: str) -> str | None:
@@ -355,8 +385,8 @@ async def _process_approved_payment(
         await state.clear()
         return
 
-    display_worksheet = await flight_label_for_client(
-        session, client.active_codes, worksheet
+    display_worksheet = (
+        await _client_flight_mask(session, client, worksheet) or FLIGHT_PLACEHOLDER
     )
 
     # --- Redis lookups ---
@@ -924,8 +954,8 @@ async def reject_payment_callback(
 
     # No mask -> the flight clause is dropped entirely; the real name never
     # reaches the client.
-    display_flight = await flight_mask_for_client(
-        session, client.active_codes if client else client_code, flight_name
+    display_flight = (
+        await _client_flight_mask(session, client, flight_name) if client else None
     )
 
     user_msg = (
@@ -1004,8 +1034,8 @@ async def _do_rejection(
 
     # No mask -> the flight clause is dropped entirely; the real name never
     # reaches the client.
-    display_flight = await flight_mask_for_client(
-        session, client.active_codes if client else client_code, flight_name
+    display_flight = (
+        await _client_flight_mask(session, client, flight_name) if client else None
     )
 
     # User notification
@@ -1184,8 +1214,8 @@ async def cash_payment_amount_received(
         return
 
     # Masked only once the client is known - the mask is per-partner.
-    display_worksheet = await flight_label_for_client(
-        session, client.active_codes, worksheet
+    display_worksheet = (
+        await _client_flight_mask(session, client, worksheet) or FLIGHT_PLACEHOLDER
     )
 
     from src.infrastructure.tools.datetime_utils import get_current_time

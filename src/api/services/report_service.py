@@ -94,12 +94,16 @@ class ReportService:
     ) -> list[str]:
         """Translate each real flight name to its partner-specific mask.
 
-        A flight with no resolvable mask degrades to an ordinal placeholder
-        rather than to the real name.
+        The names were read from the client's own ``flight_cargos`` rows, so a
+        missing alias is minted: the web app sends a listed value back as the
+        history filter and as the flight to pay, and only a real mask
+        translates back.  An ordinal placeholder remains for a client without
+        a partner; the real name is never returned.
         """
         if not real_flights:
             return real_flights
-        display = FlightDisplay(await self._resolve_partner(session, client_code))
+        partner = await self._resolve_partner(session, client_code)
+        display = FlightDisplay(partner, mint_missing=True)
         return [
             await display.label(session, real, ordinal=i)
             for i, real in enumerate(real_flights, start=1)
@@ -176,8 +180,11 @@ class ReportService:
         enriched = await asyncio.gather(*tasks)
 
         # Replace real flight names with masks before returning to the API.
-        # No mask -> placeholder; the real name never reaches the response.
-        display = FlightDisplay(await self._resolve_partner(session, client_code))
+        # Every name was read from the client's own rows (``flight_name`` only
+        # narrows them), so a missing alias is minted as in the flights list.
+        # The real name never reaches the response.
+        partner = await self._resolve_partner(session, client_code)
+        display = FlightDisplay(partner, mint_missing=True)
         for item in enriched:
             if not item.get("flight_name"):
                 continue

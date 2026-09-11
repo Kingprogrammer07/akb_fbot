@@ -13,6 +13,11 @@ from redis.asyncio import Redis
 from src.bot.filters.is_private_chat import IsPrivate
 from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.utils.decorators import handle_errors
+from src.bot.utils.flight_token import (
+    client_token_scope,
+    flight_token,
+    resolve_flight_token,
+)
 from src.bot.utils.sheets_cache import get_client_sheets_data
 from src.bot.utils.currency_cache import convert_to_uzs
 from src.infrastructure.services import ClientService
@@ -51,10 +56,15 @@ async def _build_flight_keyboard(
 ) -> InlineKeyboardBuilder:
     """Build the flights list inline keyboard.
 
-    Button labels show the partner mask (ordinal placeholder when the flight
-    has no alias yet); the real name is never rendered.
+    Button labels show the partner mask, minted for a sheet flight that has
+    no alias yet (only a client without a partner gets an ordinal), and
+    ``callback_data`` carries a :func:`flight_token`; the real name never
+    reaches the client.
     """
-    display = await FlightDisplay.for_client(session, client.active_codes)
+    display = await FlightDisplay.for_client(
+        session, client.active_codes, mint_missing=True
+    )
+    scope = client_token_scope(client.id)
     builder = InlineKeyboardBuilder()
     for position, match in enumerate(matches, start=1):
         flight_name = match["flight_name"]
@@ -66,11 +76,29 @@ async def _build_flight_keyboard(
             button_text = f"✈️ {label} - {_('info-report-not-sent')}"
         builder.button(
             text=button_text,
-            callback_data=f"info_flight:{flight_name}:{match['row_number']}",
+            callback_data=f"info_flight:{flight_token(flight_name, scope)}:{match['row_number']}",
         )
     builder.button(text=_("btn-refresh"), callback_data="refresh_info_flights")
     builder.adjust(1)
     return builder
+
+
+_INT4_MAX = 2**31 - 1
+
+
+def _sheet_flight_names(sheets_result: dict) -> list[str]:
+    """Flights listed for this client — the only ones an info button may name."""
+    if not sheets_result.get("found"):
+        return []
+    return [match["flight_name"] for match in sheets_result.get("matches", [])]
+
+
+def _parse_row_number(raw: str) -> int | None:
+    """Accept only a non-negative ASCII integer that fits ``qator_raqami`` (int4)."""
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    value = int(raw)
+    return value if value <= _INT4_MAX else None
 
 
 async def _build_payment_map(
@@ -249,22 +277,30 @@ async def flight_details_handler(
 ):
     """Show flight details when user selects a flight."""
     parts = callback.data.split(":")
-    if len(parts) != 3:
+    row_number = _parse_row_number(parts[2]) if len(parts) == 3 else None
+    if row_number is None:
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
-
-    flight_name = parts[1]
-    row_number  = int(parts[2])
 
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
 
+    # The token only resolves against this client's own sheet flights, so a
+    # forged payload or one copied from another client's button is refused.
+    result = await get_client_sheets_data(client.active_codes, redis)
+    scope = client_token_scope(client.id)
+    flight_name = resolve_flight_token(parts[1], _sheet_flight_names(result), scope)
+    if flight_name is None:
+        await _safe_answer(callback, _("error-occurred"), show_alert=True)
+        return
+
     # Everything rendered below shows the partner mask; the real flight name
-    # stays server-side (it remains the DAO lookup key).
+    # stays server-side (it remains the DAO lookup key).  The token resolved
+    # to one of the client's own sheet flights, so a missing alias is minted.
     display_flight = await flight_label_for_client(
-        session, client.active_codes, flight_name
+        session, client.active_codes, flight_name, mint_missing=True
     )
 
     payment_data = await calculate_flight_payment(
@@ -273,7 +309,6 @@ async def flight_details_handler(
 
     # No cargo yet — show "report not sent" message
     if not payment_data:
-        result = await get_client_sheets_data(client.active_codes, redis)
         track_info = "N/A"
         if result["found"] and result["matches"]:
             codes = result["matches"][0].get("track_codes", [])
@@ -354,12 +389,12 @@ async def flight_details_handler(
     builder = InlineKeyboardBuilder()
     builder.button(
         text=_("btn-view-cargo-photos"),
-        callback_data=f"view_cargo_photos:{flight_name}",
+        callback_data=f"view_cargo_photos:{flight_token(flight_name, scope)}",
     )
     if not transaction or transaction.payment_status in ("partial", "pending"):
         builder.button(
             text=_("btn-make-payment-now"),
-            callback_data=f"pay_flight:{flight_name}",
+            callback_data=f"pay_flight:{flight_token(flight_name, scope)}",
         )
     builder.button(text=_("btn-back-to-flights"), callback_data="back_to_flights")
     builder.adjust(1)
@@ -440,6 +475,7 @@ async def view_cargo_photos_handler(
     _: callable,
     session: AsyncSession,
     client_service: ClientService,
+    redis: Redis,
 ):
     """Show cargo photos for a specific flight.
 
@@ -452,10 +488,15 @@ async def view_cargo_photos_handler(
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
+        await _safe_answer(callback, _("error-occurred"), show_alert=True)
+        return
+
+    result = await get_client_sheets_data(client.active_codes, redis)
+    scope = client_token_scope(client.id)
+    flight_name = resolve_flight_token(parts[1], _sheet_flight_names(result), scope)
+    if flight_name is None:
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
 
@@ -464,9 +505,10 @@ async def view_cargo_photos_handler(
         await _safe_answer(callback, _("info-no-cargo-photos"), show_alert=True)
         return
 
-    # Summary message shows the mask, never the real flight name.
+    # Summary message shows the mask (minted for this sheet flight when
+    # missing), never the real flight name.
     display_flight = await flight_label_for_client(
-        session, client.active_codes, flight_name
+        session, client.active_codes, flight_name, mint_missing=True
     )
 
     await _safe_answer(callback)

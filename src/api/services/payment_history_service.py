@@ -8,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.client_payment_event import ClientPaymentEventDAO
-from src.infrastructure.services.flight_display import FlightDisplay
+from src.infrastructure.database.models.client_transaction import NON_FLIGHT_REYS_PREFIXES
+from src.infrastructure.services.flight_display import (
+    FLIGHT_PLACEHOLDER,
+    FlightDisplay,
+)
 from src.api.schemas.payment import (
     PaymentBreakdownSchema,
     TransactionHistoryItemSchema,
@@ -36,8 +40,9 @@ async def get_client_transaction_history(
     Returns:
         TransactionHistoryResponse with items, total_count, limit, offset.
     """
-    # Fetch paginated transactions (filter_type="all" returns everything
-    # except hidden WALLET_ADJ / UZPOST pseudo-transactions).
+    # Fetch paginated transactions.  ``get_filtered_transactions`` defaults to
+    # ``include_hidden=True``, so UZPOST / WALLET_ADJ / SYS_ADJ rows are listed
+    # as well, although the count below excludes them.
     transactions = await ClientTransactionDAO.get_filtered_transactions(
         session=session,
         client_code=client_code,
@@ -54,8 +59,9 @@ async def get_client_transaction_history(
     )
 
     # Every code is tried, not just the first: a client may hold a
-    # pre-conversion alias alongside its current code.
-    display = await FlightDisplay.for_client(session, client_code)
+    # pre-conversion alias alongside its current code.  The flights come from
+    # the client's own transactions, so a missing alias is minted.
+    display = await FlightDisplay.for_client(session, client_code, mint_missing=True)
 
     items: list[TransactionHistoryItemSchema] = []
     for tx in transactions:
@@ -72,8 +78,12 @@ async def get_client_transaction_history(
                 card=float(raw.get("card", 0) or 0),
             )
 
-        # No mask -> placeholder; the real flight name never reaches the user.
-        display_flight = await display.label(session, tx.reys)
+        # The real flight name never reaches the user; a bookkeeping row names
+        # no flight and keeps the placeholder.
+        if tx.reys.startswith(NON_FLIGHT_REYS_PREFIXES):
+            display_flight = FLIGHT_PLACEHOLDER
+        else:
+            display_flight = await display.label(session, tx.reys)
 
         items.append(
             TransactionHistoryItemSchema(

@@ -250,10 +250,13 @@ async def get_available_flights(
         return AvailableFlightsResponse(flights=[], count=0)
 
     # Resolve the partner once so each item rendered to the user shows the
-    # mask alias instead of the real flight name.  A missing partner /
-    # missing alias falls back to a generic "Reys #N" placeholder so the
-    # real identifier is never leaked.
-    display = await FlightDisplay.for_client(session, current_user.active_codes)
+    # mask alias instead of the real flight name.  Every name was read from
+    # this client's own Sheets or expected-cargo rows, so a missing alias is
+    # minted: the listed value comes back to ``/flight-details`` and
+    # ``/submit/*``, and only a real mask translates back to the flight.
+    display = await FlightDisplay.for_client(
+        session, current_user.active_codes, mint_missing=True
+    )
 
     available: list[AvailableFlightItem] = []
 
@@ -273,8 +276,8 @@ async def get_available_flights(
         )
 
         # Replace the real flight name with the partner-specific mask.
-        # Falls back to a generic ordinal placeholder when no alias exists
-        # and none can be minted, so the response never leaks the real name.
+        # Falls back to a generic ordinal placeholder only when no alias can
+        # be minted, so the response never leaks the real name.
         display_name = await display.label(
             session, flight_name, ordinal=len(available) + 1
         )
@@ -405,6 +408,8 @@ async def get_flight_details(
 
     total_payment = payment_data["total_payment"]
 
+    # ``flight_name`` came from the request: show an existing mask, never mint
+    # one from user input.
     display_flight_name = await flight_label_for_client(
         session, current_user.active_codes, flight_name
     )
@@ -475,24 +480,28 @@ async def submit_wallet_only(
         session, body.flight_name, current_user.active_codes, redis
     )
 
-    # Validate amount against actual payment
-    if payment_data:
-        total_payment = payment_data["total_payment"]
+    # Like cash and online payments, a wallet payment is for the client's own
+    # sent cargo; any other flight name is refused before staff see it.
+    if not payment_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No sent cargo found for this flight",
+        )
 
-        # For partial / full_remaining, also check existing tx
-        if body.payment_mode == "full_remaining":
-            existing_tx = await ClientTransactionDAO.get_by_client_code_flight(
-                session, current_user.active_codes, body.flight_name
+    # For full_remaining, also check existing tx
+    if body.payment_mode == "full_remaining":
+        existing_tx = await ClientTransactionDAO.get_by_client_code_flight(
+            session, current_user.active_codes, body.flight_name
+        )
+        if not existing_tx or existing_tx.payment_status != "partial":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No existing partial payment found for full_remaining mode",
             )
-            if not existing_tx or existing_tx.payment_status != "partial":
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No existing partial payment found for full_remaining mode",
-                )
 
-    track_codes = payment_data.get("track_codes", []) if payment_data else []
-    vazn = f"{payment_data['total_weight']:.2f}" if payment_data else "N/A"
-    total_payment_value = payment_data["total_payment"] if payment_data else body.amount
+    track_codes = payment_data.get("track_codes", [])
+    vazn = f"{payment_data['total_weight']:.2f}"
+    total_payment_value = payment_data["total_payment"]
 
     wallet_used = body.amount
 

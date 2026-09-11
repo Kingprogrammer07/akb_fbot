@@ -29,6 +29,7 @@ from src.config import config
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.payment_card import PaymentCardDAO
 from src.infrastructure.database.dao.user_payment_card import UserPaymentCardDAO
+from src.infrastructure.services.flight_display import FlightDisplay
 from src.infrastructure.services.user_payment_card import UserPaymentCardService
 from src.infrastructure.database.models.client import Client
 
@@ -76,6 +77,11 @@ async def get_balance(
     transactions = await ClientTransactionDAO.get_by_telegram_id(
         session, current_user.telegram_id
     )
+    # The flights come from the client's own transactions, so a missing alias
+    # is minted: the web app sends the shown mask back to /flight-details.
+    display = await FlightDisplay.for_client(
+        session, current_user.active_codes, mint_missing=True
+    )
     reminders = []
 
     for tx in transactions:
@@ -87,7 +93,7 @@ async def get_balance(
             )
             reminders.append(
                 PaymentReminderItem(
-                    flight=tx.reys,
+                    flight=await display.label(session, tx.reys),
                     total=float(tx.total_amount) if tx.total_amount else float(tx.summa or 0),
                     paid=float(tx.paid_amount) if tx.paid_amount else 0.0,
                     remaining=float(tx.remaining_amount) if tx.remaining_amount else 0.0,
