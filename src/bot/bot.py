@@ -5,6 +5,7 @@ This module runs both the Telegram bot (webhook) and FastAPI server in parallel.
 Run with: python -m src.bot.bot
 """
 
+import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager
@@ -216,6 +217,13 @@ async def shutdown_bot():
         await redis_client.close()
 
 
+WEBHOOK_SETUP_ATTEMPTS = 3
+"""Tries for ``setWebhook`` before startup gives up on it."""
+
+WEBHOOK_SETUP_RETRY_SECONDS = 3
+"""Pause between those tries; startup waits at most twice this long."""
+
+
 def _expected_webhook_secret() -> str:
     """Secret registered with ``setWebhook`` and required on ``POST /webhook``."""
     return webhook_secret_token(config.telegram.TOKEN.get_secret_value())
@@ -248,20 +256,36 @@ async def lifespan(app: FastAPI):
     if webhook_url := config.telegram.WEBHOOK_URL:
         webhook_path = "/webhook"
         full_webhook_url = f"{webhook_url}{webhook_path}"
-        try:
-            await bot.set_webhook(
-                url=full_webhook_url,
-                drop_pending_updates=True,
-                secret_token=_expected_webhook_secret(),
-            )
-            logger.info(f"Webhook set to: {full_webhook_url}")
-        except Exception as e:
-            # /webhook refuses updates without the secret, so a failed
-            # registration silences the bot: this must reach the ops channel.
-            logger.error(
-                f"Failed to set webhook: {e}. Telegram updates are refused until "
-                "the webhook is registered with the secret token; restart to retry."
-            )
+        # /webhook refuses updates without the secret, so a failed registration
+        # silences the bot until someone restarts it.  Telegram being briefly
+        # unreachable at boot is retried; only the last failure is an ERROR,
+        # which reaches the ops channel.
+        for attempt in range(1, WEBHOOK_SETUP_ATTEMPTS + 1):
+            try:
+                await bot.set_webhook(
+                    url=full_webhook_url,
+                    drop_pending_updates=True,
+                    secret_token=_expected_webhook_secret(),
+                )
+                logger.info(f"Webhook set to: {full_webhook_url}")
+                break
+            except Exception as e:
+                if attempt < WEBHOOK_SETUP_ATTEMPTS:
+                    logger.warning(
+                        "Webhook registration attempt %d of %d failed: %s; "
+                        "retrying in %ss",
+                        attempt,
+                        WEBHOOK_SETUP_ATTEMPTS,
+                        e,
+                        WEBHOOK_SETUP_RETRY_SECONDS,
+                    )
+                    await asyncio.sleep(WEBHOOK_SETUP_RETRY_SECONDS)
+                    continue
+                logger.error(
+                    f"Failed to set webhook after {WEBHOOK_SETUP_ATTEMPTS} "
+                    f"attempts: {e}. Telegram updates are refused until the "
+                    "webhook is registered with the secret token; restart to retry."
+                )
     else:
         logger.warning("No WEBHOOK_URL configured - webhook not set")
 

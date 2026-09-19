@@ -350,6 +350,56 @@ async def test_failed_webhook_registration_is_logged_as_an_error(
         async with bot_module.lifespan(FastAPI()):
             pass
 
-    assert len(unreachable.set_webhook_calls) == 1
+    assert len(unreachable.set_webhook_calls) == bot_module.WEBHOOK_SETUP_ATTEMPTS
     failures = [r for r in caplog.records if "Failed to set webhook" in r.getMessage()]
     assert [r.levelno for r in failures] == [logging.ERROR]
+
+
+class FlakyTelegramBot(FakeBot):
+    """A ``Bot`` whose ``setWebhook`` fails once, as on a blip at boot."""
+
+    async def set_webhook(self, **kwargs: object) -> bool:
+        self.set_webhook_calls.append(kwargs)
+        if len(self.set_webhook_calls) == 1:
+            raise RuntimeError("Cannot connect to host api.telegram.org:443")
+        return True
+
+
+async def test_webhook_registration_is_retried_before_giving_up(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One failed call must not leave the bot silent until someone restarts it."""
+    flaky = FlakyTelegramBot()
+
+    async def fake_setup_bot() -> tuple[
+        FakeBot, FakeDispatcher, FakeRedisClient, FakeDatabaseClient
+    ]:
+        return flaky, FakeDispatcher(), FakeRedisClient(), FakeDatabaseClient()
+
+    async def skip_seeding(session: object) -> None:
+        return None
+
+    async def skip_shutdown() -> None:
+        return None
+
+    for name in ("bot", "dp", "redis_client", "db_client"):
+        monkeypatch.setattr(bot_module, name, None)
+    monkeypatch.setattr(bot_module, "setup_bot", fake_setup_bot)
+    monkeypatch.setattr(bot_module, "shutdown_bot", skip_shutdown)
+    monkeypatch.setattr(seeders, "seed_permissions", skip_seeding)
+    monkeypatch.setattr(seeders, "seed_roles", skip_seeding)
+    monkeypatch.setattr(bot_module.config.telegram, "WEBHOOK_URL", WEBHOOK_URL)
+    monkeypatch.setattr(bot_module, "WEBHOOK_SETUP_RETRY_SECONDS", 0)
+
+    with caplog.at_level(logging.DEBUG):
+        async with bot_module.lifespan(FastAPI()):
+            pass
+
+    assert len(flaky.set_webhook_calls) == 2
+    assert flaky.set_webhook_calls[1]["secret_token"] == webhook_secret_token(
+        bot_module.config.telegram.TOKEN.get_secret_value()
+    )
+    assert any("Webhook set to" in r.getMessage() for r in caplog.records)
+    assert not [
+        r for r in caplog.records if "Failed to set webhook" in r.getMessage()
+    ]
