@@ -18,6 +18,10 @@ class DatabaseClient:
             pool_timeout=30,  # Wait 30 seconds for a free connection
             pool_pre_ping=True,  # Check connection health before use
             pool_recycle=3600,  # Recycle connections every hour to avoid stale connections
+            # Without this a failing statement carries its parameters - passport
+            # series, PINFL, phone - into the exception text, and from there into
+            # the log line, ``api_request_logs`` and any 400 body built from it.
+            hide_parameters=True,
         )
         self.session_factory = async_sessionmaker(bind=self.engine, expire_on_commit=False)
 
