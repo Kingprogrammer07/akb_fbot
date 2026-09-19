@@ -23,6 +23,13 @@ name reaches an end user:
 Step 3 never returns the real name.  That is the whole point: a missing
 mask is a rendering problem, not a licence to leak.
 
+The one name that needs no mask is the partner's own number.  The China
+import writes ``AKB285`` into ``cargo_items.flight_name``, and that is the
+number AKB tells its clients in the first place, so it is rendered as it is
+(``FlightMaskService.is_own_mask_name``) and no alias is minted for it —
+masking it again renumbered every AKB flight, reaching clients as ``AKB359``.
+A client of any other partner still sees that same flight under its own mask.
+
 **Minting is limited to names read from the client's own records.**  By
 default rendering never writes: a missing alias yields ``None``.  A caller
 passes ``mint_missing=True`` only when every flight name it hands to this
@@ -257,13 +264,19 @@ class FlightDisplay:
 
         With ``mint_missing`` a missing alias is created, so ``None`` is left
         for clients without a partner and for names that cannot carry an
-        alias (blank, or longer than the alias column).  Never returns
-        ``real_flight_name``.
+        alias (blank, or longer than the alias column).  Returns
+        ``real_flight_name`` only when it already is this partner's own number
+        (:meth:`FlightMaskService.is_own_mask_name`).
         """
         if not real_flight_name or self._partner is None:
             return None
         if real_flight_name in self._cache:
             return self._cache[real_flight_name]
+        if FlightMaskService.is_own_mask_name(self._partner.code, real_flight_name):
+            # Masking a name the partner's own clients are told would renumber
+            # the flight; an alias minted for it before this rule is ignored.
+            self._cache[real_flight_name] = real_flight_name
+            return real_flight_name
 
         masked = await FlightMaskService.real_to_mask(
             session, self._partner.id, real_flight_name

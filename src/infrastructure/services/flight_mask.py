@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.infrastructure.database.dao.partner_flight_alias import (
     PartnerFlightAliasDAO,
 )
+from src.infrastructure.database.models.partner import Partner
 from src.infrastructure.database.models.partner_flight_alias import (
     PartnerFlightAlias,
 )
@@ -54,6 +55,29 @@ class FlightMaskService:
 
     # Auto-generation pattern: '{partner_code}{digits}'
     _AUTO_SUFFIX_RE = re.compile(r"^(?P<digits>\d+)$")
+
+    @staticmethod
+    def is_own_mask_name(partner_code: str, real_flight_name: str) -> bool:
+        """Is ``real_flight_name`` already this partner's own number?
+
+        The China import names each worksheet after the number AKB tells its
+        clients, so ``cargo_items`` stores flights as ``AKB285``.  Minting a
+        mask for such a name gives a flight the clients already know a second
+        number — that is how ``AKB285`` reached them as ``AKB359`` — and binds
+        that number to a different flight, so a cashier typing ``AKB283``
+        landed on real flight ``AKB209``.
+
+        A name in the partner's own ``CODE<digits>`` form — the form
+        :meth:`_next_auto_mask` generates — is therefore shown as it is and
+        never gets an alias.  It leaks nothing: the string is the partner's
+        own.  For every other partner the same name is masked as usual.
+        """
+        code = (partner_code or "").strip().upper()
+        name = (real_flight_name or "").strip().upper()
+        if not code or not name.startswith(code):
+            return False
+        suffix = name[len(code) :]
+        return suffix.isascii() and suffix.isdigit()
 
     # ------------------------------------------------------------------
     # Read paths
@@ -161,6 +185,31 @@ class FlightMaskService:
     # ------------------------------------------------------------------
     # Composite helpers
     # ------------------------------------------------------------------
+
+    @classmethod
+    async def display_flight_name(
+        cls,
+        session: AsyncSession,
+        partner: Partner,
+        real_flight_name: str,
+    ) -> str:
+        """The name ``partner``'s clients may see for ``real_flight_name``.
+
+        Mints the alias when the partner has none, except for a name already
+        in the partner's own numbering (:meth:`is_own_mask_name`), which is
+        returned unchanged and stores nothing.  ``FlightDisplay`` makes the
+        same decision when it renders to one client; this helper is for the
+        admin senders that resolve one flight for whole partner groups.
+        """
+        if cls.is_own_mask_name(partner.code, real_flight_name):
+            return real_flight_name
+        alias = await cls.ensure_mask(
+            session,
+            partner_id=partner.id,
+            partner_code=partner.code,
+            real_flight_name=real_flight_name,
+        )
+        return alias.mask_flight_name
 
     @classmethod
     async def normalize_flight_input(
