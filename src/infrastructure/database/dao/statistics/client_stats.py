@@ -221,7 +221,8 @@ class ClientStatsDAO:
               AND reys NOT LIKE 'WALLET_ADJ%%'
               AND reys NOT LIKE 'SYS_ADJ%%'
             GROUP BY region_code, district_subcode
-            HAVING region_code IS NOT NULL
+            -- No HAVING on region_code: PostgreSQL cannot name a SELECT alias
+            -- there, and the WHERE admits only codes the CASE maps to a region.
         """)
         fin_rows = (
             await self.session.execute(fin_sql, {"start_dt": start_dt, "end_dt": end_dt})

@@ -49,6 +49,11 @@ class PartnerAdminStates(StatesGroup):
 # ---------------------------------------------------------------------------
 
 
+def _yes_no(value: bool) -> str:
+    """Uzbek yes/no label for a boolean flag."""
+    return "ha" if value else "yo'q"
+
+
 def _partner_row(partner) -> str:
     routing = "DM" if partner.is_dm_partner else (
         f"guruh: <code>{partner.group_chat_id}</code>"
@@ -153,14 +158,24 @@ async def partner_open(
     psd = await PartnerStaticDataDAO.get_for_partner(session, partner.id)
     foto_preview = (psd.foto_hisobot if psd and psd.foto_hisobot else "—")[:200]
 
+    # ``Partner.prefix_aliases`` is selectin-loaded, so this needs no extra query.
+    extra_line = (
+        ", ".join(
+            html_module.escape(prefix)
+            for prefix in sorted(alias.prefix for alias in partner.prefix_aliases)
+        )
+        or "—"
+    )
+
     text = (
         f"⚙️ <b>{html_module.escape(partner.display_name)}</b> "
         f"(<code>{html_module.escape(partner.code)}</code>)\n\n"
         f"<b>Prefix:</b> <code>{html_module.escape(partner.prefix)}</code>\n"
-        f"<b>DM partner:</b> {'ha' if partner.is_dm_partner else 'yo'}'q\n"
+        f"<b>Qo'shimcha prefikslar:</b> <code>{extra_line}</code>\n"
+        f"<b>DM partner:</b> {_yes_no(partner.is_dm_partner)}\n"
         f"<b>Guruh ID:</b> "
         f"<code>{partner.group_chat_id if partner.group_chat_id else '—'}</code>\n"
-        f"<b>Aktiv:</b> {'ha' if partner.is_active else 'yo'}'q\n\n"
+        f"<b>Aktiv:</b> {_yes_no(partner.is_active)}\n\n"
         f"<b>Foto hisobot:</b>\n<code>{html_module.escape(foto_preview)}</code>"
     )
     await callback.message.delete()

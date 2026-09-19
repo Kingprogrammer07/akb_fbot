@@ -41,11 +41,12 @@ from src.infrastructure.database.dao.static_data import StaticDataDAO
 from src.infrastructure.database.models.client import Client
 from src.infrastructure.services import PaymentCardService
 from src.infrastructure.database.dao.partner_payment_method import PartnerPaymentMethodDAO
-from src.infrastructure.services.flight_mask import FlightMaskService
-from src.infrastructure.services.partner_resolver import (
-    PartnerNotFoundError,
-    get_resolver,
+from src.infrastructure.services.flight_display import (
+    FlightDisplay,
+    flight_label_for_client,
+    resolve_partner_for_codes,
 )
+from src.infrastructure.services.flight_mask import FlightMaskService
 from src.infrastructure.tools.image_optimizer import optimize_image_to_webp
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.s3_manager import s3_manager
@@ -74,15 +75,8 @@ async def _normalize_flight(
     """
     if not current_user.active_codes or not flight_input:
         return flight_input
-    
-    partner = None
-    for code in current_user.active_codes:
-        try:
-            partner = await get_resolver().resolve_by_client_code(session, code)
-            break
-        except PartnerNotFoundError:
-            continue
-            
+
+    partner = await resolve_partner_for_codes(session, current_user.active_codes)
     if not partner:
         return flight_input
     return await FlightMaskService.normalize_flight_input(
@@ -256,16 +250,13 @@ async def get_available_flights(
         return AvailableFlightsResponse(flights=[], count=0)
 
     # Resolve the partner once so each item rendered to the user shows the
-    # mask alias instead of the real flight name.  A missing partner /
-    # missing alias falls back to a generic "Reys #N" placeholder so the
-    # real identifier is never leaked.
-    partner = None
-    for code in current_user.active_codes:
-        try:
-            partner = await get_resolver().resolve_by_client_code(session, code)
-            break
-        except PartnerNotFoundError:
-            continue
+    # mask alias instead of the real flight name.  Every name was read from
+    # this client's own Sheets or expected-cargo rows, so a missing alias is
+    # minted: the listed value comes back to ``/flight-details`` and
+    # ``/submit/*``, and only a real mask translates back to the flight.
+    display = await FlightDisplay.for_client(
+        session, current_user.active_codes, mint_missing=True
+    )
 
     available: list[AvailableFlightItem] = []
 
@@ -285,14 +276,11 @@ async def get_available_flights(
         )
 
         # Replace the real flight name with the partner-specific mask.
-        # Falls back to a generic ordinal placeholder when no alias has
-        # been configured yet so the response never leaks the real name.
-        masked: str | None = None
-        if partner is not None:
-            masked = await FlightMaskService.real_to_mask(
-                session, partner.id, flight_name
-            )
-        display = masked or f"Reys #{len(available) + 1}"
+        # Falls back to a generic ordinal placeholder only when no alias can
+        # be minted, so the response never leaks the real name.
+        display_name = await display.label(
+            session, flight_name, ordinal=len(available) + 1
+        )
 
         if existing_tx and existing_tx.payment_status == "partial":
             remaining = (
@@ -302,7 +290,7 @@ async def get_available_flights(
             )
             available.append(
                 AvailableFlightItem(
-                    flight_name=display,
+                    flight_name=display_name,
                     total_payment=payment_data["total_payment"]
                     if payment_data
                     else None,
@@ -313,7 +301,7 @@ async def get_available_flights(
         else:
             available.append(
                 AvailableFlightItem(
-                    flight_name=display,
+                    flight_name=display_name,
                     total_payment=payment_data["total_payment"]
                     if payment_data
                     else None,
@@ -355,15 +343,7 @@ async def get_flight_details(
 
     # The frontend now sends the partner mask (e.g. ``AKB1``); translate
     # to the real flight name before any cargo / transaction lookup.
-    primary = current_user.primary_code
-    if primary:
-        try:
-            partner = await get_resolver().resolve_by_client_code(session, primary)
-            flight_name = await FlightMaskService.normalize_flight_input(
-                session, partner.id, flight_name
-            )
-        except PartnerNotFoundError:
-            pass
+    flight_name = await _normalize_flight(session, current_user, flight_name)
 
     payment_data = await _calculate_flight_payment(
         session, flight_name, current_user.active_codes, redis
@@ -428,8 +408,11 @@ async def get_flight_details(
 
     total_payment = payment_data["total_payment"]
 
-    display_flight_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
-    display_flight_name = display_flight_name or flight_name
+    # ``flight_name`` came from the request: show an existing mask, never mint
+    # one from user input.
+    display_flight_name = await flight_label_for_client(
+        session, current_user.active_codes, flight_name
+    )
 
     return FlightPaymentDetailsResponse(
         flight_name=display_flight_name,
@@ -497,24 +480,28 @@ async def submit_wallet_only(
         session, body.flight_name, current_user.active_codes, redis
     )
 
-    # Validate amount against actual payment
-    if payment_data:
-        total_payment = payment_data["total_payment"]
+    # Like cash and online payments, a wallet payment is for the client's own
+    # sent cargo; any other flight name is refused before staff see it.
+    if not payment_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No sent cargo found for this flight",
+        )
 
-        # For partial / full_remaining, also check existing tx
-        if body.payment_mode == "full_remaining":
-            existing_tx = await ClientTransactionDAO.get_by_client_code_flight(
-                session, current_user.active_codes, body.flight_name
+    # For full_remaining, also check existing tx
+    if body.payment_mode == "full_remaining":
+        existing_tx = await ClientTransactionDAO.get_by_client_code_flight(
+            session, current_user.active_codes, body.flight_name
+        )
+        if not existing_tx or existing_tx.payment_status != "partial":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No existing partial payment found for full_remaining mode",
             )
-            if not existing_tx or existing_tx.payment_status != "partial":
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No existing partial payment found for full_remaining mode",
-                )
 
-    track_codes = payment_data.get("track_codes", []) if payment_data else []
-    vazn = f"{payment_data['total_weight']:.2f}" if payment_data else "N/A"
-    total_payment_value = payment_data["total_payment"] if payment_data else body.amount
+    track_codes = payment_data.get("track_codes", [])
+    vazn = f"{payment_data['total_weight']:.2f}"
+    total_payment_value = payment_data["total_payment"]
 
     wallet_used = body.amount
 
@@ -558,8 +545,9 @@ async def submit_wallet_only(
             detail="Failed to send notification to admin group",
         )
 
-    display_flight_name = await FlightMaskService.real_to_mask(session, 1, body.flight_name)
-    display_flight_name = display_flight_name or body.flight_name
+    display_flight_name = await flight_label_for_client(
+        session, current_user.active_codes, body.flight_name
+    )
 
     return PaymentSubmissionResponse(
         message="Wallet payment submitted for admin approval",
@@ -672,8 +660,9 @@ async def submit_cash(
             detail="Failed to send notification to admin group",
         )
 
-    display_flight_name = await FlightMaskService.real_to_mask(session, 1, body.flight_name)
-    display_flight_name = display_flight_name or body.flight_name
+    display_flight_name = await flight_label_for_client(
+        session, current_user.active_codes, body.flight_name
+    )
 
     return PaymentSubmissionResponse(
         message="Cash payment submitted for admin approval",
@@ -911,8 +900,9 @@ async def submit_online(
         cache_amount_key = f"payment_amount:{current_user.primary_code}:{flight_name}"
         await redis.setex(cache_amount_key, 86400, str(paid_amount))
 
-    display_flight_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
-    display_flight_name = display_flight_name or flight_name
+    display_flight_name = await flight_label_for_client(
+        session, current_user.active_codes, flight_name
+    )
 
     return PaymentSubmissionResponse(
         message="Payment receipt submitted for admin approval",

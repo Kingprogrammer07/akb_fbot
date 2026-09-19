@@ -1,7 +1,10 @@
 """Query filter helpers for database operations."""
 from sqlalchemy import or_, Select
 
-from src.infrastructure.database.models.client_transaction import ClientTransaction
+from src.infrastructure.database.models.client_transaction import (
+    HIDDEN_REYS_PREFIXES,
+    ClientTransaction,
+)
 
 
 def apply_public_transaction_filter(
@@ -43,8 +46,9 @@ def apply_public_transaction_filter(
     """
     if not include_hidden:
         query = query.where(
-            ~ClientTransaction.reys.like("UZPOST%"),
-            ~ClientTransaction.reys.like("WALLET_ADJ:%"),
-            ~ClientTransaction.reys.like("SYS_ADJ:%")
+            *(
+                ~ClientTransaction.reys.like(f"{prefix}%")
+                for prefix in HIDDEN_REYS_PREFIXES
+            )
         )
     return query

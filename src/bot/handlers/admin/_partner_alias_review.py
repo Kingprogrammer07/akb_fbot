@@ -71,7 +71,8 @@ async def build_review(
 
     The function is idempotent — re-running it on the same flight returns
     the same masks.  Auto-generation only fires for partners that don't
-    have an alias for ``real_flight_name`` yet.
+    have an alias for ``real_flight_name`` yet, and never for a flight
+    already named in the partner's own numbering.
     """
     resolver = get_resolver()
     grouped: dict[int, list[str]] = {}
@@ -93,18 +94,15 @@ async def build_review(
     segments: list[PartnerSegment] = []
     for partner_id, codes in grouped.items():
         partner = partner_index[partner_id]
-        alias = await FlightMaskService.ensure_mask(
-            session,
-            partner_id=partner.id,
-            partner_code=partner.code,
-            real_flight_name=real_flight_name,
+        mask_flight_name = await FlightMaskService.display_flight_name(
+            session, partner, real_flight_name
         )
         segments.append(
             PartnerSegment(
                 partner=partner,
                 client_codes=sorted(set(codes)),
                 real_flight_name=real_flight_name,
-                mask_flight_name=alias.mask_flight_name,
+                mask_flight_name=mask_flight_name,
             )
         )
 
