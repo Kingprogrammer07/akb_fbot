@@ -32,7 +32,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     WebAppInfo,
 )
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aiogram.fsm.state import State, StatesGroup as _StatesGroupAlias  # noqa: F401  (re-exported below)
@@ -85,6 +85,10 @@ MAX_PHOTOS_PER_MESSAGE = 10
 PROGRESS_UPDATE_INTERVAL = 5  # percent
 DEFAULT_USD_TO_UZS_RATE = 12_000
 CAPTION_MAX_LENGTH = 1024
+STALE_SCREEN_ALERT = (
+    "⚠️ Bu oyna eskirgan: sessiya tugagan yoki yuborish allaqachon "
+    "boshlangan. Reysni qaytadan tanlang."
+)
 
 
 class SendStatus(str, Enum):
@@ -1625,7 +1629,6 @@ async def alias_edit_prompt(
     bot: Bot,
 ):
     """Admin chose a partner row → ask for the new mask."""
-    await callback.answer()
     try:
         partner_id = int(callback.data.split(":", 1)[1])
     except (ValueError, IndexError):
@@ -1644,6 +1647,7 @@ async def alias_edit_prompt(
         await state.clear()
         return
 
+    await callback.answer()
     current_mask = await FlightMaskService.real_to_mask(
         session, partner.id, flight_name
     )
@@ -1734,8 +1738,6 @@ async def alias_proceed(
     bot: Bot,
 ):
     """Admin confirmed all masks → show the final send confirmation screen."""
-    await callback.answer()
-
     data = await state.get_data()
     flight_name = data.get("flight_name")
     total_clients = data.get("total_clients", 0)
@@ -1745,6 +1747,7 @@ async def alias_proceed(
         await state.clear()
         return
 
+    await callback.answer()
     keyboard = _build_row_keyboard(
         [
             ("✅ Yuborish", "bulk_confirm_send"),
@@ -1753,7 +1756,7 @@ async def alias_proceed(
     )
 
     await callback.message.delete()
-    await safe_send_message(
+    confirmation = await safe_send_message(
         bot,
         chat_id=callback.from_user.id,
         text=(
@@ -1768,9 +1771,37 @@ async def alias_proceed(
     )
 
     await state.set_state(BulkSendStates.confirming_send)
+    # Binding the screen to the FSM data stops an older confirmation, still
+    # visible in the chat, from sending whichever flight was selected last.
+    # update_data also renews the data TTL, which set_state alone does not.
+    await state.update_data(
+        confirm_message_id=confirmation.message_id if confirmation else None
+    )
 
 
-@router.callback_query(F.data == "bulk_confirm_send", IsAdmin())
+async def _remove_inline_keyboard(bot: Bot, callback: CallbackQuery) -> None:
+    """Strip the buttons from the message a callback came from, best effort."""
+    if callback.message is None:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            reply_markup=None,
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Could not remove bulk-send buttons: %s", exc)
+
+
+async def _reject_stale_screen(callback: CallbackQuery, bot: Bot) -> None:
+    """Answer a button of an outdated bulk-send screen and disarm that screen."""
+    await callback.answer(STALE_SCREEN_ALERT, show_alert=True)
+    await _remove_inline_keyboard(bot, callback)
+
+
+@router.callback_query(
+    F.data == "bulk_confirm_send", BulkSendStates.confirming_send, IsAdmin()
+)
 async def confirm_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
     """Confirmed - start bulk sending.
 
@@ -1778,12 +1809,30 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
     ``A-``; otherwise uses the regular ``BulkCargoSender``.  Both senders
     share identical external signatures so the handler stays thin.
     """
-    await callback.answer()
-
     data = await state.get_data()
-    flight_name = data["flight_name"]
-    clients_data = data["clients_data"]
-    total_clients = data["total_clients"]
+    flight_name: str | None = data.get("flight_name")
+    clients_data: dict[str, list[int]] | None = data.get("clients_data")
+
+    if not flight_name or not clients_data:
+        # Redis expires FSM data after config.redis.TTL, and the state and data
+        # keys are renewed separately, so the state can outlive its data.
+        await state.clear()
+        await _reject_stale_screen(callback, bot)
+        return
+
+    confirm_message_id = data.get("confirm_message_id")
+    if callback.message is None or callback.message.message_id != confirm_message_id:
+        await _reject_stale_screen(callback, bot)
+        return
+
+    # Leave confirming_send before any Telegram round-trip, so a second tap
+    # on the same button is routed to stale_bulk_button instead of starting
+    # a duplicate send (the senders do not re-check what was already sent).
+    await state.set_state(BulkSendStates.sending_in_progress)
+    await callback.answer()
+    await _remove_inline_keyboard(bot, callback)
+
+    total_clients: int = data.get("total_clients") or len(clients_data)
 
     # Local import keeps the ostatka module optional and avoids a cycle —
     # ostatka_sender itself imports helpers defined above in this file.
@@ -1811,9 +1860,7 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
     task_id = _generate_task_id(callback.from_user.id)
 
     await progress_msg.edit_reply_markup(
-        reply_markup=_build_keyboard(
-            ("⏸ Bekor qilish", f"bulk_cancel_task:{progress_msg.message_id}")
-        )
+        reply_markup=_build_keyboard(("⏸ Bekor qilish", f"bulk_cancel_task:{task_id}"))
     )
 
     # Create sender and start task
@@ -1830,8 +1877,23 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
     task = asyncio.create_task(sender.run())
     _active_tasks[task_id] = BulkSendTask(task=task)
 
-    await state.set_state(BulkSendStates.sending_in_progress)
     await state.update_data(task_id=task_id)
+
+
+@router.callback_query(
+    F.data.in_({"bulk_confirm_send", "bulk_alias_proceed"})
+    | F.data.startswith("bulk_alias_edit:"),
+    IsAdmin(),
+)
+async def stale_bulk_button(callback: CallbackQuery, bot: Bot):
+    """A bulk-send button pressed outside the FSM state it belongs to.
+
+    The keyboards stay in the chat indefinitely, while the FSM behind them
+    expires in Redis, is cleared by other admin flows, or has moved on to
+    sending.  Registered after the state-bound handlers, so it only catches
+    what they did not.
+    """
+    await _reject_stale_screen(callback, bot)
 
 
 @router.callback_query(F.data.startswith("bulk_cancel_task:"), IsAdmin())
@@ -1839,10 +1901,10 @@ async def cancel_task(callback: CallbackQuery, state: FSMContext):
     """Cancel ongoing bulk send."""
     await callback.answer("Bekor qilinyapti...")
 
-    data = await state.get_data()
-    task_id = data.get("task_id")
-
-    if task_id and task_id in _active_tasks:
+    # The button carries the task id: a long send can outlive the FSM data
+    # TTL, and the state may have been cleared by another admin flow.
+    task_id = callback.data.split(":", 1)[1]
+    if task_id in _active_tasks:
         _active_tasks[task_id].cancel()
 
     await callback.message.delete()
