@@ -7,6 +7,8 @@ acceptable in admin tooling and migrations.
 """
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +45,43 @@ class PartnerFlightAliasDAO:
             )
         )
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_by_real_names(
+        session: AsyncSession,
+        partner_ids: Collection[int],
+        real_flight_names: Collection[str],
+    ) -> list[PartnerFlightAlias]:
+        """Batch-load the aliases of many partners for many real flights.
+
+        The real name is compared case-insensitively because ``reys`` values
+        come from Sheets and are not guaranteed to share the alias's casing.
+        """
+        if not partner_ids or not real_flight_names:
+            return []
+        upper_names = {name.upper() for name in real_flight_names}
+        result = await session.execute(
+            select(PartnerFlightAlias).where(
+                PartnerFlightAlias.partner_id.in_(partner_ids),
+                func.upper(PartnerFlightAlias.real_flight_name).in_(upper_names),
+            )
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def find_by_mask_any_case(
+        session: AsyncSession,
+        mask_flight_name: str,
+        partner_id: int | None = None,
+    ) -> list[PartnerFlightAlias]:
+        """Case-insensitive mask lookup, across every partner when ``partner_id`` is None."""
+        stmt = select(PartnerFlightAlias).where(
+            func.upper(PartnerFlightAlias.mask_flight_name) == mask_flight_name.upper()
+        )
+        if partner_id is not None:
+            stmt = stmt.where(PartnerFlightAlias.partner_id == partner_id)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
 
     @staticmethod
     async def list_for_partner(

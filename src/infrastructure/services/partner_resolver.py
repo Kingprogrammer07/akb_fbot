@@ -15,6 +15,7 @@ Threading note: aiogram + FastAPI run on a single asyncio loop, so a plain
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -133,6 +134,38 @@ class PartnerResolver:
                 f"no partner registered for client_code={client_code!r}"
             )
         return partner
+
+    async def resolve_many(
+        self, session: AsyncSession, client_codes: Iterable[str]
+    ) -> dict[str, Partner]:
+        """Resolve many ``client_code`` values in one pass.
+
+        Returns a mapping from the upper-cased code to its partner; codes
+        that match no partner are left out instead of raising.  The cache is
+        refreshed at most once per call, so a page full of legacy codes does
+        not reload the partner table once per code.
+        """
+        await self._ensure_loaded(session)
+
+        normalised_codes = {
+            code.strip().upper() for code in client_codes if code and code.strip()
+        }
+        resolved: dict[str, Partner] = {}
+        unmatched: list[str] = []
+        for code in normalised_codes:
+            partner = self._match_lpm(code)
+            if partner is None:
+                unmatched.append(code)
+            else:
+                resolved[code] = partner
+
+        if unmatched:
+            await self.refresh(session)
+            for code in unmatched:
+                partner = self._match_lpm(code)
+                if partner is not None:
+                    resolved[code] = partner
+        return resolved
 
     def _match_lpm(self, normalised_code: str) -> Partner | None:
         for prefix in self._prefixes_lpm:

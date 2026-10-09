@@ -8,6 +8,9 @@ table.  Provides four primitives:
 * :meth:`ensure_mask`  — atomic get-or-create with auto-generation.
 * :meth:`set_mask`     — admin override; validates uniqueness.
 
+Staff screens that list many clients at once use the read-only batch
+helpers :meth:`masks_for_client_flights` and :meth:`real_names_for_mask`.
+
 The auto-generation rule for a brand-new mask is:
 ``{partner.code}{N}`` where ``N`` is one greater than the highest numeric
 suffix already used by *any* mask of that partner that matches the
@@ -19,7 +22,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +35,7 @@ from src.infrastructure.database.dao.partner_flight_alias import (
 from src.infrastructure.database.models.partner_flight_alias import (
     PartnerFlightAlias,
 )
+from src.infrastructure.services.partner_resolver import get_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,29 @@ class FlightMaskConflictError(FlightMaskError):
 class MaskPair:
     real: str
     mask: str
+
+
+@dataclass(frozen=True)
+class ClientFlightMasks:
+    """Masks resolved for a batch of ``(client_code, real flight)`` pairs.
+
+    Built by :meth:`FlightMaskService.masks_for_client_flights`; lookups
+    normalise the client code the same way the builder does, so callers can
+    pass raw ``ClientTransaction.client_code`` values.
+    """
+
+    by_pair: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    @staticmethod
+    def key(client_code: str, real_flight_name: str) -> tuple[str, str]:
+        return client_code.strip().upper(), real_flight_name
+
+    def get(
+        self, client_code: str | None, real_flight_name: str | None
+    ) -> str | None:
+        if not client_code or not real_flight_name:
+            return None
+        return self.by_pair.get(self.key(client_code, real_flight_name))
 
 
 class FlightMaskService:
@@ -76,6 +104,74 @@ class FlightMaskService:
             session, partner_id, mask_flight_name
         )
         return alias.real_flight_name if alias else None
+
+    @staticmethod
+    async def masks_for_client_flights(
+        session: AsyncSession,
+        pairs: Iterable[tuple[str | None, str | None]],
+    ) -> ClientFlightMasks:
+        """Batch :meth:`real_to_mask` for rows that belong to different clients.
+
+        Each client code is routed to its partner, then every needed alias is
+        loaded in one query.  Read-only on purpose: unlike :meth:`ensure_mask`
+        this never invents a mask, so staff screens show exactly what the
+        client was told.  Pairs without a partner or alias are left out.
+        """
+        wanted = {
+            ClientFlightMasks.key(code, flight)
+            for code, flight in pairs
+            if code and code.strip() and flight
+        }
+        if not wanted:
+            return ClientFlightMasks()
+
+        partners_by_code = await get_resolver().resolve_many(
+            session, {code for code, _ in wanted}
+        )
+        if not partners_by_code:
+            return ClientFlightMasks()
+
+        aliases = await PartnerFlightAliasDAO.get_by_real_names(
+            session,
+            partner_ids={partner.id for partner in partners_by_code.values()},
+            real_flight_names={flight for _, flight in wanted},
+        )
+        exact: dict[tuple[int, str], str] = {}
+        any_case: dict[tuple[int, str], str] = {}
+        for alias in aliases:
+            exact[(alias.partner_id, alias.real_flight_name)] = alias.mask_flight_name
+            any_case.setdefault(
+                (alias.partner_id, alias.real_flight_name.upper()),
+                alias.mask_flight_name,
+            )
+
+        by_pair: dict[tuple[str, str], str] = {}
+        for code, flight in wanted:
+            partner = partners_by_code.get(code)
+            if partner is None:
+                continue
+            mask = exact.get((partner.id, flight)) or any_case.get(
+                (partner.id, flight.upper())
+            )
+            if mask:
+                by_pair[(code, flight)] = mask
+        return ClientFlightMasks(by_pair=by_pair)
+
+    @staticmethod
+    async def real_names_for_mask(
+        session: AsyncSession,
+        mask_flight_name: str,
+        partner_id: int | None = None,
+    ) -> list[str]:
+        """Real flight names behind a mask, ignoring case.
+
+        Without ``partner_id`` every partner is searched, so the result can
+        hold several names when two partners reuse the same custom mask.
+        """
+        aliases = await PartnerFlightAliasDAO.find_by_mask_any_case(
+            session, mask_flight_name.strip(), partner_id
+        )
+        return list(dict.fromkeys(alias.real_flight_name for alias in aliases))
 
     # ------------------------------------------------------------------
     # Write paths

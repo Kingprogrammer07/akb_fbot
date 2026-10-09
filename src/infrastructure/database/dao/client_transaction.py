@@ -507,6 +507,16 @@ class ClientTransactionDAO:
         return list(result.scalars().all())
 
     @staticmethod
+    async def flight_exists(session: AsyncSession, flight_name: str) -> bool:
+        """True when at least one transaction is recorded under ``flight_name`` (any case)."""
+        result = await session.execute(
+            select(ClientTransaction.id)
+            .where(func.upper(ClientTransaction.reys) == flight_name.upper())
+            .limit(1)
+        )
+        return result.first() is not None
+
+    @staticmethod
     async def mark_as_taken(session: AsyncSession, transaction_id: int) -> bool:
         """Mark transaction as cargo taken."""
         from datetime import datetime, timezone

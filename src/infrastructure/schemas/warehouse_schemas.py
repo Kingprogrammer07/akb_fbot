@@ -61,6 +61,7 @@ class WarehouseTransactionItem(BaseModel):
     client_full_name: str | None = None   # injected by the router (not on the ORM model)
     client_phone: str | None = None       # injected by the router
     flight_name: str = Field(alias="reys")
+    flight_mask: str | None = None        # partner mask the client sees; injected by the router
     row_number: int = Field(alias="qator_raqami")
     weight: str = Field(alias="vazn")
     total_amount: float | None
@@ -145,6 +146,7 @@ class WarehouseActivityItem(BaseModel):
     transaction_id: int
     client_code: str | None
     flight_name: str | None
+    flight_mask: str | None = None  # partner mask the client sees for this flight
     total_amount: float | None
     paid_amount: float | None
     remaining_amount: float | None
@@ -191,6 +193,7 @@ class GroupedTransactionItem(BaseModel):
 
 class FlightGroup(BaseModel):
     flight_name: str
+    flight_mask: str | None = None  # partner mask the client sees; None when not masked
     total_weight_kg: float
     total_amount: float
     total_remaining_amount: float

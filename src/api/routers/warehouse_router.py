@@ -54,6 +54,11 @@ from src.infrastructure.database.dao.cargo_delivery_proof import CargoDeliveryPr
 from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.models.flight_cargo import FlightCargo
+from src.infrastructure.services.flight_mask import FlightMaskService
+from src.infrastructure.services.partner_resolver import (
+    PartnerNotFoundError,
+    get_resolver,
+)
 from src.infrastructure.tools.image_optimizer import optimize_image_to_webp
 from src.infrastructure.tools.s3_manager import s3_manager
 from src.infrastructure.tools.datetime_utils import get_current_time, to_tashkent
@@ -253,6 +258,44 @@ async def _load_clients_by_transaction_code(
         if client:
             clients_by_code[code] = client
     return clients_by_code
+
+
+async def _resolve_flight_filter(
+    session: AsyncSession,
+    flight: str | None,
+    client_code: str | None = None,
+) -> str | None:
+    """Translate a flight filter typed as a partner mask into the real flight name.
+
+    Partner clients only know their masked flight name, so warehouse staff
+    may type either form.  With ``client_code`` the mask is looked up for that
+    client's partner first.  Otherwise a mask is accepted only when it points
+    to a single real flight and no real flight already carries that name.
+    """
+    if not flight:
+        return flight
+
+    if client_code:
+        try:
+            partner = await get_resolver().resolve_by_client_code(session, client_code)
+        except PartnerNotFoundError:
+            partner = None
+        if partner is not None:
+            partner_real_names = await FlightMaskService.real_names_for_mask(
+                session, flight, partner.id
+            )
+            if partner_real_names:
+                return partner_real_names[0]
+
+    real_names_by_upper = {
+        name.upper(): name
+        for name in await FlightMaskService.real_names_for_mask(session, flight)
+    }
+    if len(real_names_by_upper) != 1:
+        return flight
+    if await ClientTransactionDAO.flight_exists(session, flight):
+        return flight
+    return next(iter(real_names_by_upper.values()))
 
 
 def _build_payment_status_label(payment_status: str, remaining_amount: float) -> str:
@@ -530,6 +573,15 @@ async def get_my_activity(
     )
     total_pages = math.ceil(total_count / size) if total_count else 0
 
+    flight_masks = await FlightMaskService.masks_for_client_flights(
+        session,
+        (
+            (proof.transaction.client_code, proof.transaction.reys)
+            for proof in proofs
+            if proof.transaction
+        ),
+    )
+
     items: list[WarehouseActivityItem] = []
     for proof in proofs:
         tx = proof.transaction  # eagerly loaded by the DAO via selectinload
@@ -549,6 +601,7 @@ async def get_my_activity(
                 transaction_id=proof.transaction_id,
                 client_code=tx.client_code if tx else None,
                 flight_name=tx.reys if tx else None,
+                flight_mask=flight_masks.get(tx.client_code, tx.reys) if tx else None,
                 total_amount=float(tx.total_amount)
                 if tx and tx.total_amount is not None
                 else None,
@@ -659,21 +712,7 @@ async def search_transactions(
             detail="Kamida bitta qidiruv parametri kerak: code, phone, name yoki q.",
         )
 
-    # Translate the partner-mask flight name (if used) to its real value
-    # before building the DAO filter — cashiers may type either form.
-    if flight and code:
-        from src.infrastructure.services.flight_mask import FlightMaskService
-        from src.infrastructure.services.partner_resolver import (
-            PartnerNotFoundError,
-            get_resolver,
-        )
-        try:
-            _partner = await get_resolver().resolve_by_client_code(session, code)
-            flight = await FlightMaskService.normalize_flight_input(
-                session, _partner.id, flight
-            )
-        except PartnerNotFoundError:
-            pass
+    flight = await _resolve_flight_filter(session, flight, code)
 
     # Build combined filter_type
     if taken_status == "taken":
@@ -730,6 +769,9 @@ async def search_transactions(
     # Single batch query to know which transactions already have proof.
     search_tx_ids = [tx.id for tx in db_transactions]
     proven_ids = await CargoDeliveryProofDAO.get_proven_transaction_ids(session, search_tx_ids)
+    flight_masks = await FlightMaskService.masks_for_client_flights(
+        session, ((tx.client_code, tx.reys) for tx in db_transactions)
+    )
 
     items: list[WarehouseTransactionItem] = []
     for tx in db_transactions:
@@ -740,6 +782,7 @@ async def search_transactions(
         item.client_full_name = full_name
         item.client_phone = phone_val
         item.has_proof = tx.id in proven_ids
+        item.flight_mask = flight_masks.get(tx.client_code, tx.reys)
         items.append(item)
 
     total_pages = math.ceil(total_count / size) if total_count else 0
@@ -785,7 +828,12 @@ async def list_flight_transactions(
 
     ``payment_status`` / ``taken_status`` filters are applied server-side and
     map to the existing ``get_filtered_transactions`` DAO logic.
+
+    ``flight_name`` may also be a partner mask; it is translated to the real
+    flight before querying.
     """
+    flight_name = await _resolve_flight_filter(session, flight_name, code) or flight_name
+
     # Build combined filter_type for the DAO.
     # The DAO supports: all | paid | unpaid | partial | taken | not_taken
     # taken_status takes precedence when both are non-"all" (rare in practice).
@@ -979,6 +1027,12 @@ async def list_flight_transactions(
         items.append(item)
 
     items.extend(synthetic_items)
+
+    flight_masks = await FlightMaskService.masks_for_client_flights(
+        session, ((item.client_code, item.flight_name) for item in items)
+    )
+    for item in items:
+        item.flight_mask = flight_masks.get(item.client_code, item.flight_name)
 
     # Sort items if synthetic ones were appended
     # For now they are appended after db items, which might break sorting but allows pagination to work simply
@@ -1686,6 +1740,8 @@ async def search_transactions_grouped(
             detail="Kamida bitta qidiruv parametri kerak: code, phone, name, q yoki flight.",
         )
 
+    flight = await _resolve_flight_filter(session, flight, code)
+
     # Build combined filter_type
     if taken_status == "taken":
         dao_filter_type = "taken"
@@ -1778,6 +1834,9 @@ async def search_transactions_grouped(
 
     search_tx_ids = [tx.id for tx in db_transactions]
     proven_ids = await CargoDeliveryProofDAO.get_proven_transaction_ids(session, search_tx_ids)
+    flight_masks = await FlightMaskService.masks_for_client_flights(
+        session, ((tx.client_code, tx.reys) for tx in db_transactions)
+    )
 
     # Group transactions by client_code -> reys
     from collections import defaultdict
@@ -1847,6 +1906,7 @@ async def search_transactions_grouped(
                 
             flight_groups.append(FlightGroup(
                 flight_name=flight_name,
+                flight_mask=flight_masks.get(c_code, flight_name),
                 total_weight_kg=round(f_total_weight, 2),
                 total_amount=round(f_total_amount, 2),
                 total_remaining_amount=round(f_remaining_amount, 2),
@@ -1903,6 +1963,7 @@ async def export_transactions_excel(
     name = name.strip() if name and name.strip() else None
     q = q.strip() if q and q.strip() else None
     flight = flight.strip() if flight and flight.strip() else None
+    flight = await _resolve_flight_filter(session, flight, code)
 
     if taken_status == "taken":
         dao_filter_type = "taken"
@@ -1973,6 +2034,10 @@ async def export_transactions_excel(
         if client_obj:
             client_map[c_code] = client_obj
 
+    flight_masks = await FlightMaskService.masks_for_client_flights(
+        session, ((tx.client_code, tx.reys) for tx in transactions)
+    )
+
     # ---- build Excel ----
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1984,10 +2049,10 @@ async def export_transactions_excel(
 
     headers = [
         "#", "Mijoz kodi", "Ism Familiya", "Telefon",
-        "Reys", "Vazn (kg)", "Jami summa", "To'langan", "Qolgan",
+        "Reys", "Reys maskasi", "Vazn (kg)", "Jami summa", "To'langan", "Qolgan",
         "To'lov holati", "Olib ketilganmi", "Olib ketilgan sana", "Yaratilgan sana",
     ]
-    col_widths = [5, 14, 22, 16, 14, 12, 14, 14, 14, 16, 16, 20, 20]
+    col_widths = [5, 14, 22, 16, 14, 14, 12, 14, 14, 14, 16, 16, 20, 20]
 
     for col_idx, (header, width) in enumerate(zip(headers, col_widths), start=1):
         cell = ws.cell(row=1, column=col_idx, value=header)
@@ -2015,6 +2080,7 @@ async def export_transactions_excel(
             full_name or "",
             phone_num or "",
             tx.reys or "",
+            flight_masks.get(tx.client_code, tx.reys) or "",
             float(tx.vazn) if tx.vazn and tx.vazn.replace(".", "", 1).isdigit() else "",
             float(tx.summa) if tx.summa else 0,
             float(tx.paid_amount) if tx.paid_amount else 0,
