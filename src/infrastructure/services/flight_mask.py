@@ -172,7 +172,11 @@ class FlightMaskService:
         by_pair: dict[tuple[str, str], str] = {}
         for code, flight in wanted:
             partner = partners_by_code.get(code)
-            if partner is None:
+            # A flight already in the partner's own numbering is what its
+            # clients see; a leftover alias for it would only mislead staff.
+            if partner is None or FlightMaskService.is_own_mask_name(
+                partner.code, flight
+            ):
                 continue
             mask = exact.get((partner.id, flight)) or any_case.get(
                 (partner.id, flight.upper())
