@@ -217,7 +217,8 @@ class FinancialStatsDAO:
                 AND (UPPER(client_code) ~ '^A[0-9]{{2}}-'
                      OR UPPER(client_code) ~ '^A[A-Z]{{2}}[0-9]+$')
             GROUP BY region_code
-            HAVING region_code IS NOT NULL
+            -- No HAVING on region_code: PostgreSQL cannot name a SELECT alias
+            -- there, and the WHERE admits only codes the CASE maps to a region.
             ORDER BY revenue DESC
         """
         result = await session.execute(text(sql), params)
@@ -277,7 +278,8 @@ class FinancialStatsDAO:
                 AND (UPPER(client_code) ~ '^A[0-9]{{2}}-'
                      OR UPPER(client_code) ~ '^A[A-Z]{{2}}[0-9]+$')
             GROUP BY region_code, district_subcode
-            HAVING region_code IS NOT NULL
+            -- No HAVING on region_code: PostgreSQL cannot name a SELECT alias
+            -- there, and the WHERE admits only codes the CASE maps to a region.
             ORDER BY revenue DESC
         """
         rows = (await session.execute(text(sql), params)).mappings().all()

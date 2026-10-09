@@ -228,7 +228,7 @@ class CargoService:
         if not cargos:
             return None
 
-        usd_rate = get_usd_rate()
+        usd_rate = await get_usd_rate(session)
         extra_charge = await get_extra_charge(session)
 
         total_weight = 0.0

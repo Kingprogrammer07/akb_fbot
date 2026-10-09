@@ -4,10 +4,12 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Depends
 from pydantic import BaseModel
 
 from src.api.services.import_service import ImportService
-from src.api.dependencies import get_admin_user
-from src.infrastructure.database.models.client import Client
+from src.api.dependencies import AdminJWTPayload, require_permission
 
 router = APIRouter(prefix="/import", tags=["import"])
+
+# An import writes cargo rows for any client and flight.
+_RequireCargoCreate = Depends(require_permission("cargo", "create"))
 
 
 class ImportResponse(BaseModel):
@@ -21,7 +23,7 @@ class ImportResponse(BaseModel):
 async def import_uz_database(
     request: Request,
     excel_file: UploadFile = File(...),
-    # _admin: Client = Depends(get_admin_user),
+    _admin: AdminJWTPayload = _RequireCargoCreate,
 ) -> ImportResponse:
     """
     Import Uzbekistan (post-flight) database from Excel file.
@@ -70,7 +72,7 @@ async def import_uz_database(
 async def import_china_database(
     request: Request,
     excel_file: UploadFile = File(...),
-    # _admin: Client = Depends(get_admin_user),
+    _admin: AdminJWTPayload = _RequireCargoCreate,
 ) -> ImportResponse:
     """
     Import China (pre-flight) database from Excel file.

@@ -65,7 +65,9 @@ async def process_track_code(
 
     track_code = message.text.strip().upper()
 
-    # 3. Qidiruv
+    # 3. Qidiruv — admin uchun ataylab scope'siz (allowed_client_codes=None):
+    # admin har qanday mijozning yukini ko'ra olishi kerak. Foydalanuvchi
+    # handler'i (user/track_code.py) aksincha o'z kodlari bilan cheklangan.
     results = await cargo_service.search_by_track_code(track_code, session)
 
     # 4. Topilmasa

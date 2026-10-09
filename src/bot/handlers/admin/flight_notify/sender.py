@@ -133,11 +133,12 @@ class FlightNotifySender:
         # for this real flight.  Done once up-front so the per-message loop
         # never opens a DB session.
         #
-        # ``ensure_mask`` (not ``real_to_mask``) is deliberate: this handler is
-        # not wired to the admin alias-review screen, so a partner that has
-        # never been bulk-sent would otherwise have no alias and every client
-        # would receive the REAL flight name.  Auto-generating the mask here
-        # mirrors what ``bulk_cargo_sender`` does via ``build_review``.
+        # ``display_flight_name`` (not ``real_to_mask``) is deliberate: this
+        # handler is not wired to the admin alias-review screen, so a partner
+        # that has never been bulk-sent would otherwise have no alias and every
+        # client would receive the REAL flight name.  Auto-generating the mask
+        # here mirrors what ``bulk_cargo_sender`` does via ``build_review``; a
+        # flight already named in the partner's own numbering keeps that name.
         async with DatabaseClient(config.database.database_url) as db:
             async with db.session_factory() as session:
                 resolver = get_resolver()
@@ -155,11 +156,8 @@ class FlightNotifySender:
                     ):
                         continue
                     try:
-                        alias = await FlightMaskService.ensure_mask(
-                            session,
-                            partner_id=partner.id,
-                            partner_code=partner.code,
-                            real_flight_name=self.flight_name,
+                        display_flight = await FlightMaskService.display_flight_name(
+                            session, partner, self.flight_name
                         )
                     except Exception:
                         # Never fall back to the real flight name — that is the
@@ -173,9 +171,7 @@ class FlightNotifySender:
                             self.flight_name,
                         )
                         continue
-                    self._display_flight_for_partner[partner.id] = (
-                        alias.mask_flight_name
-                    )
+                    self._display_flight_for_partner[partner.id] = display_flight
                 await session.commit()
 
     def _display_flight_for(self, client: ClientNotifyData) -> str:

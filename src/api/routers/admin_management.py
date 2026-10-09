@@ -40,6 +40,7 @@ from src.infrastructure.schemas.admin_management import (
     UpdateRolePermissionsRequest,
     UpdateRoleRequest,
 )
+from src.infrastructure.services.admin_identity_service import AdminIdentityService
 from src.infrastructure.services.admin_rbac_service import RBACService
 
 router = APIRouter(prefix="/admin/manage", tags=["Super Admin Management"])
@@ -182,7 +183,15 @@ async def update_admin_status(
     body: UpdateAdminStatusRequest,
     admin: AdminJWTPayload = Depends(require_permission("admin_accounts", "update")),
     session: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> AdminAccountResponse:
+    """
+    Flip an admin account's active flag.
+
+    Deactivation must take effect immediately, so the cached identity is
+    dropped after the commit — otherwise the target's existing JWT would keep
+    working until the cache expired.
+    """
     target = await AdminAccountDAO.get_by_id_with_relations(session, admin_account_id)
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Admin hisob topilmadi.")
@@ -202,6 +211,7 @@ async def update_admin_status(
         },
     )
     await session.commit()
+    await AdminIdentityService.invalidate(redis, admin_account_id)
     await session.refresh(target)
     return AdminAccountResponse.model_validate(target)
 
@@ -223,8 +233,9 @@ async def update_admin_account(
 
     - ``system_username``: checked for uniqueness before applying.
     - ``pin``: hashed with bcrypt; also resets failed-login counter and lockout.
-    - ``role_id``: verified to exist; RBAC cache for the old role is invalidated
-      so the admin gets fresh permissions on their next request.
+    - ``role_id``: verified to exist; the RBAC cache for the old role and the
+      target's cached identity are both invalidated, so the new role takes
+      effect on their next request instead of when their JWT expires.
     """
     if not body.model_dump(exclude_none=True):
         raise HTTPException(
@@ -275,6 +286,11 @@ async def update_admin_account(
     if old_role_name:
         await RBACService.invalidate_role(redis, old_role_name)
 
+    # The role name is baked into the target's existing JWT; drop the cached
+    # identity so authorisation switches to the new role on the next request.
+    if changes:
+        await AdminIdentityService.invalidate(redis, admin_account_id)
+
     refreshed = await AdminAccountDAO.get_by_id_with_relations(session, admin_account_id)
     return AdminAccountResponse.model_validate(refreshed)
 
@@ -297,6 +313,8 @@ async def delete_admin_account(
     - An admin cannot delete their own account.
     - The underlying Client record is never touched — only the AdminAccount row.
     - The RBAC Redis cache for the deleted admin's role is invalidated immediately.
+    - The deleted admin's cached identity is dropped, so any JWT they still
+      hold stops authenticating on the next request.
     """
     if admin_account_id == admin.admin_id:
         raise HTTPException(
@@ -324,6 +342,8 @@ async def delete_admin_account(
         },
     )
     await session.commit()
+
+    await AdminIdentityService.invalidate(redis, admin_account_id)
 
     if role_name_for_cache:
         await RBACService.invalidate_role(redis, role_name_for_cache)
@@ -658,5 +678,11 @@ async def update_role(
     await RBACService.invalidate_role(redis, old_role_name)
     if body.name is not None and body.name != old_role_name:
         await RBACService.invalidate_role(redis, body.name)
+
+        # Cached identities still carry the old role name, which no longer
+        # resolves to any permission set. Refresh every affected admin so the
+        # rename does not lock them out until the cache expires.
+        for affected_admin_id in await AdminAccountDAO.get_ids_by_role(session, role_id):
+            await AdminIdentityService.invalidate(redis, affected_admin_id)
 
     return RoleResponse.model_validate(role)

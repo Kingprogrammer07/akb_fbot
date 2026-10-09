@@ -13,9 +13,18 @@ from redis.asyncio import Redis
 from src.bot.filters.is_private_chat import IsPrivate
 from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.utils.decorators import handle_errors
+from src.bot.utils.flight_token import (
+    client_token_scope,
+    flight_token,
+    resolve_flight_token,
+)
 from src.bot.utils.sheets_cache import get_client_sheets_data
 from src.bot.utils.currency_cache import convert_to_uzs
 from src.infrastructure.services import ClientService
+from src.infrastructure.services.flight_display import (
+    FlightDisplay,
+    flight_label_for_client,
+)
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
 from src.infrastructure.database.dao.static_data import StaticDataDAO
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
@@ -38,27 +47,58 @@ async def _safe_answer(callback: CallbackQuery, text: str = "", show_alert: bool
     await safe_answer_callback(callback, text, show_alert)
 
 
-def _build_flight_keyboard(
+async def _build_flight_keyboard(
+    session: AsyncSession,
+    client,
     matches: list[dict],
     payment_map: dict,
     _: callable,
 ) -> InlineKeyboardBuilder:
-    """Build the flights list inline keyboard."""
+    """Build the flights list inline keyboard.
+
+    Button labels show the partner mask, minted for a sheet flight that has
+    no alias yet (only a client without a partner gets an ordinal), and
+    ``callback_data`` carries a :func:`flight_token`; the real name never
+    reaches the client.
+    """
+    display = await FlightDisplay.for_client(
+        session, client.active_codes, mint_missing=True
+    )
+    scope = client_token_scope(client.id)
     builder = InlineKeyboardBuilder()
-    for match in matches:
+    for position, match in enumerate(matches, start=1):
         flight_name = match["flight_name"]
+        label = await display.label(session, flight_name, ordinal=position)
         payment_data = payment_map.get(flight_name)
         if payment_data:
-            button_text = f"✈️ {flight_name} - {payment_data['total_payment']:,.2f} so'm"
+            button_text = f"✈️ {label} - {payment_data['total_payment']:,.2f} so'm"
         else:
-            button_text = f"✈️ {flight_name} - {_('info-report-not-sent')}"
+            button_text = f"✈️ {label} - {_('info-report-not-sent')}"
         builder.button(
             text=button_text,
-            callback_data=f"info_flight:{flight_name}:{match['row_number']}",
+            callback_data=f"info_flight:{flight_token(flight_name, scope)}:{match['row_number']}",
         )
     builder.button(text=_("btn-refresh"), callback_data="refresh_info_flights")
     builder.adjust(1)
     return builder
+
+
+_INT4_MAX = 2**31 - 1
+
+
+def _sheet_flight_names(sheets_result: dict) -> list[str]:
+    """Flights listed for this client — the only ones an info button may name."""
+    if not sheets_result.get("found"):
+        return []
+    return [match["flight_name"] for match in sheets_result.get("matches", [])]
+
+
+def _parse_row_number(raw: str) -> int | None:
+    """Accept only a non-negative ASCII integer that fits ``qator_raqami`` (int4)."""
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    value = int(raw)
+    return value if value <= _INT4_MAX else None
 
 
 async def _build_payment_map(
@@ -218,7 +258,9 @@ async def info_handler(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    builder     = await _build_flight_keyboard(
+        session, client, result["matches"], payment_map, _
+    )
 
     await message.answer(_("info-flights-list"), reply_markup=builder.as_markup())
 
@@ -235,17 +277,31 @@ async def flight_details_handler(
 ):
     """Show flight details when user selects a flight."""
     parts = callback.data.split(":")
-    if len(parts) != 3:
+    row_number = _parse_row_number(parts[2]) if len(parts) == 3 else None
+    if row_number is None:
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
-
-    flight_name = parts[1]
-    row_number  = int(parts[2])
 
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
+
+    # The token only resolves against this client's own sheet flights, so a
+    # forged payload or one copied from another client's button is refused.
+    result = await get_client_sheets_data(client.active_codes, redis)
+    scope = client_token_scope(client.id)
+    flight_name = resolve_flight_token(parts[1], _sheet_flight_names(result), scope)
+    if flight_name is None:
+        await _safe_answer(callback, _("error-occurred"), show_alert=True)
+        return
+
+    # Everything rendered below shows the partner mask; the real flight name
+    # stays server-side (it remains the DAO lookup key).  The token resolved
+    # to one of the client's own sheet flights, so a missing alias is minted.
+    display_flight = await flight_label_for_client(
+        session, client.active_codes, flight_name, mint_missing=True
+    )
 
     payment_data = await calculate_flight_payment(
         session, flight_name, client.active_codes, redis
@@ -253,7 +309,6 @@ async def flight_details_handler(
 
     # No cargo yet — show "report not sent" message
     if not payment_data:
-        result = await get_client_sheets_data(client.active_codes, redis)
         track_info = "N/A"
         if result["found"] and result["matches"]:
             codes = result["matches"][0].get("track_codes", [])
@@ -262,7 +317,7 @@ async def flight_details_handler(
         await callback.message.edit_text(
             _(
                 "info-report-not-sent-message",
-                flight_name=flight_name,
+                flight_name=display_flight,
                 client_code=client.primary_code,
                 track_codes=_("admin-leftover-column-track-code") + ": " + track_info,
             ),
@@ -308,7 +363,7 @@ async def flight_details_handler(
         details_text = _(
             "info-flight-details-partial",
             client_code=client.primary_code,
-            worksheet=flight_name,
+            worksheet=display_flight,
             total=f"{total_amount:,.2f}",
             paid=f"{paid_amount:,.2f}",
             remaining=f"{remaining_amount:,.2f}",
@@ -320,7 +375,7 @@ async def flight_details_handler(
         details_text = _(
             "info-flight-details-with-status",
             client_code=client.primary_code,
-            worksheet=flight_name,
+            worksheet=display_flight,
             summa=f"{payment_data['total_payment']:,.2f}",
             vazn=f"{payment_data['total_weight']:.2f}",
             trek_kodlari=trek_kodlari_text,
@@ -334,12 +389,12 @@ async def flight_details_handler(
     builder = InlineKeyboardBuilder()
     builder.button(
         text=_("btn-view-cargo-photos"),
-        callback_data=f"view_cargo_photos:{flight_name}",
+        callback_data=f"view_cargo_photos:{flight_token(flight_name, scope)}",
     )
     if not transaction or transaction.payment_status in ("partial", "pending"):
         builder.button(
             text=_("btn-make-payment-now"),
-            callback_data=f"pay_flight:{flight_name}",
+            callback_data=f"pay_flight:{flight_token(flight_name, scope)}",
         )
     builder.button(text=_("btn-back-to-flights"), callback_data="back_to_flights")
     builder.adjust(1)
@@ -369,7 +424,9 @@ async def back_to_flights_callback(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    builder     = await _build_flight_keyboard(
+        session, client, result["matches"], payment_map, _
+    )
 
     await callback.message.edit_text(_("info-flights-list"), reply_markup=builder.as_markup())
     await _safe_answer(callback)
@@ -398,7 +455,9 @@ async def refresh_info_flights_callback(
         return
 
     payment_map = await _build_payment_map(session, result["matches"], client.active_codes, redis)
-    builder     = _build_flight_keyboard(result["matches"], payment_map, _)
+    builder     = await _build_flight_keyboard(
+        session, client, result["matches"], payment_map, _
+    )
 
     try:
         await callback.message.delete()
@@ -416,6 +475,7 @@ async def view_cargo_photos_handler(
     _: callable,
     session: AsyncSession,
     client_service: ClientService,
+    redis: Redis,
 ):
     """Show cargo photos for a specific flight.
 
@@ -428,10 +488,15 @@ async def view_cargo_photos_handler(
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
 
-    flight_name = parts[1]
-
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
+        await _safe_answer(callback, _("error-occurred"), show_alert=True)
+        return
+
+    result = await get_client_sheets_data(client.active_codes, redis)
+    scope = client_token_scope(client.id)
+    flight_name = resolve_flight_token(parts[1], _sheet_flight_names(result), scope)
+    if flight_name is None:
         await _safe_answer(callback, _("error-occurred"), show_alert=True)
         return
 
@@ -439,6 +504,12 @@ async def view_cargo_photos_handler(
     if not cargos:
         await _safe_answer(callback, _("info-no-cargo-photos"), show_alert=True)
         return
+
+    # Summary message shows the mask (minted for this sheet flight when
+    # missing), never the real flight name.
+    display_flight = await flight_label_for_client(
+        session, client.active_codes, flight_name, mint_missing=True
+    )
 
     await _safe_answer(callback)
 
@@ -473,7 +544,7 @@ async def view_cargo_photos_handler(
         _(
             "info-cargo-photos-summary",
             total=total_sent,
-            flight_name=flight_name,
+            flight_name=display_flight,
             client_code=client.primary_code,
         )
     )

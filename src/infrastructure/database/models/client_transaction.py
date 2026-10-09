@@ -13,6 +13,20 @@ if TYPE_CHECKING:
     )
 
 
+HIDDEN_REYS_PREFIXES: tuple[str, ...] = ("UZPOST", "WALLET_ADJ:", "SYS_ADJ:")
+"""``reys`` prefixes of internal bookkeeping rows that clients never see.
+
+``apply_public_transaction_filter`` hides them from client-facing lists.
+"""
+
+NON_FLIGHT_REYS_PREFIXES: tuple[str, ...] = (*HIDDEN_REYS_PREFIXES, "BONUS:", "PENALTY:")
+"""``reys`` prefixes of every balance bookkeeping row; none of them names a flight.
+
+The admin client editor writes ``BONUS:`` and ``PENALTY:`` rows, which clients
+do see.  No such row ever gets a flight alias.
+"""
+
+
 class ClientTransaction(Base):
     """Client transaction for tracking payments."""
 

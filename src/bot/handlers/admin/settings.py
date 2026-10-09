@@ -19,6 +19,7 @@ from src.bot.utils.db_backup import create_database_backup, cleanup_backup_file
 from src.bot.utils.responses import reply_with_admin_panel
 from src.bot.keyboards.reply_kb.admin_menu import get_admin_main_menu
 from src.infrastructure.database.dao.admin_account import AdminAccountDAO
+from src.infrastructure.services.admin_identity_service import AdminIdentityService
 from src.infrastructure.database.dao.client import ClientDAO
 from src.infrastructure.database.dao.payment_card import PaymentCardDAO
 from src.infrastructure.database.dao.static_data import StaticDataDAO
@@ -1240,6 +1241,7 @@ async def root_admin_protected_handler(
 async def fire_admin_handler(
     callback: CallbackQuery,
     session: AsyncSession,
+    redis: Redis,
     _: callable
 ) -> None:
     """Remove admin privileges from a client."""
@@ -1282,6 +1284,12 @@ async def fire_admin_handler(
     # Demote legacy bot role too.
     target.role = 'user'
     await session.commit()
+
+    if account:
+        # The admin panel authenticates against a cached copy of is_active;
+        # drop it so a JWT issued before this dismissal stops working now
+        # rather than when the cache expires.
+        await AdminIdentityService.invalidate(redis, account.id)
 
     await callback.answer(
         _("admin-settings-remove-admin-success", full_name=target.full_name),

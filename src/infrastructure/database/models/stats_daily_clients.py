@@ -1,5 +1,5 @@
 """Daily client statistics aggregation model."""
-from sqlalchemy import Date, Integer, BigInteger, UniqueConstraint, Index
+from sqlalchemy import Date, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.database.models.base import Base
@@ -56,9 +56,9 @@ class StatsDailyClients(Base):
     )
     
     # Unique constraint: one row per date
+    # (the stat_date index is declared inline via index=True above)
     __table_args__ = (
         UniqueConstraint('stat_date', name='uq_stats_daily_clients_date'),
-        Index('ix_stats_daily_clients_stat_date', 'stat_date'),
     )
     
     def __repr__(self) -> str:

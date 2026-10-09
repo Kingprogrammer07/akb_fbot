@@ -22,12 +22,18 @@ from src.bot.keyboards.user.reply_keyb.user_home_kyb import user_main_menu_kyb
 from src.bot.utils.i18n import i18n
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.client_payment_event import ClientPaymentEventDAO
+from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
+from src.infrastructure.database.models.client import Client
 from src.infrastructure.services import (
     ClientService,
     ClientTransactionService,
     PaymentAllocationService,
-    FlightMaskService,
 )
+from src.infrastructure.services.flight_display import (
+    FLIGHT_PLACEHOLDER,
+    flight_mask_for_client,
+)
+from src.infrastructure.services.admin_identity_service import resolve_admin_pk_by_telegram_id
 from src.infrastructure.tools.money_utils import parse_money
 from src.infrastructure.tools.passport_image_resolver import _is_s3_key
 from src.infrastructure.tools.s3_manager import s3_manager
@@ -92,6 +98,34 @@ def _extract_flight_name(text: str | None) -> str:
 def _user_translator(client, lang_fallback: str = "uz") -> callable:
     lang = client.language_code if client and client.language_code else lang_fallback
     return lambda key, **kw: i18n.get(lang, key, **kw)
+
+
+async def _client_flight_mask(
+    session: AsyncSession, client: Client, flight_name: str
+) -> str | None:
+    """Return the mask ``client`` may see for its payment's flight, else ``None``.
+
+    The flight arrives exactly as it was submitted with the payment - in the
+    approval callback or the staff caption - so it may name a flight the
+    client has no cargo in, or spell an owned one in another case.  An
+    existing alias is used as is.  Otherwise a mask is minted only for a
+    flight the client's own ``flight_cargos`` rows name, and under the name
+    stored there, so a submitted string never becomes an alias.  Never
+    returns the real name.
+    """
+    if not flight_name:
+        return None
+    mask = await flight_mask_for_client(session, client.active_codes, flight_name)
+    if mask is not None:
+        return mask
+    own_cargo = await FlightCargoDAO.get_by_client(
+        session, flight_name, client.active_codes, limit=1
+    )
+    if not own_cargo:
+        return None
+    return await flight_mask_for_client(
+        session, client.active_codes, own_cargo[0].flight_name, mint_missing=True
+    )
 
 
 async def _get_redis_str(redis: Redis, key: str) -> str | None:
@@ -326,7 +360,8 @@ async def _process_approved_payment(
         redis:            Redis client.
         client_service:   ClientService instance.
         transaction_service: ClientTransactionService instance (reserved for future use).
-        approver_id:      Telegram ID of the approving admin.
+        approver_id:      Telegram ID of the approving admin.  Translated to the
+                          AdminAccount PK before it reaches any audit column.
         approver_name:    Display name of the approving admin.
         answer_func:      Callable that sends a reply to the admin (message.answer or
                           callback.message.answer).
@@ -350,8 +385,9 @@ async def _process_approved_payment(
         await state.clear()
         return
 
-    display_worksheet = await FlightMaskService.real_to_mask(session, 1, worksheet)
-    display_worksheet = display_worksheet or worksheet
+    display_worksheet = (
+        await _client_flight_mask(session, client, worksheet) or FLIGHT_PLACEHOLDER
+    )
 
     # --- Redis lookups ---
     wallet_used = await _get_redis_float(redis, f"wallet_used:{client_code}:{worksheet}")
@@ -406,13 +442,18 @@ async def _process_approved_payment(
     # --- Persist payment ---
     from datetime import timedelta
 
+    # Audit columns store the AdminAccount PK, not the Telegram id — resolve
+    # before writing so the cashier log can attribute this payment.
+    approver_admin_pk = await resolve_admin_pk_by_telegram_id(session, approver_id)
+
     if existing_tx and existing_tx.payment_status == "partial":
         await ClientPaymentEventDAO.create(
             session=session,
             transaction_id=existing_tx.id,
             payment_provider=payment_provider,
             amount=amount,
-            approved_by_admin_id=approver_id,
+            approved_by_admin_id=approver_admin_pk,
+            approved_by_telegram_id=approver_id,
             payment_type="online",
             payment_card_id=payment_card_id,
         )
@@ -511,7 +552,8 @@ async def _process_approved_payment(
                     else "click"
                 ),
                 amount=amount,
-                approved_by_admin_id=approver_id,
+                approved_by_admin_id=approver_admin_pk,
+                approved_by_telegram_id=approver_id,
                 payment_type="online",
                 payment_card_id=payment_card_id,
             )
@@ -575,7 +617,10 @@ async def _process_approved_payment(
             "paid_amount": final_paid if is_partial else None,
             "remaining_amount": final_remaining if is_partial else None,
             "total_amount": final_total if is_partial else None,
-            "approved_by_admin_id": approver_id,
+            # Telegram id, deliberately: analytics events are keyed by Telegram
+            # user, unlike client_payment_events.approved_by_admin_id which
+            # stores the AdminAccount PK.
+            "approved_by_telegram_id": approver_id,
         },
     )
     await session.commit()
@@ -907,12 +952,15 @@ async def reject_payment_callback(
     client = await client_service.get_client_by_code(client_code, session)
     user_text = _user_translator(client)
 
-    display_flight = await FlightMaskService.real_to_mask(session, 1, flight_name)
-    display_flight = display_flight or flight_name
+    # No mask -> the flight clause is dropped entirely; the real name never
+    # reaches the client.
+    display_flight = (
+        await _client_flight_mask(session, client, flight_name) if client else None
+    )
 
     user_msg = (
         f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi. Admin bilan bog'laning."
-        if flight_name
+        if display_flight
         else user_text("payment-rejected-user")
     )
     if client:
@@ -984,20 +1032,23 @@ async def _do_rejection(
     )
     user_text = _user_translator(client)
 
-    display_flight = await FlightMaskService.real_to_mask(session, 1, flight_name)
-    display_flight = display_flight or flight_name
+    # No mask -> the flight clause is dropped entirely; the real name never
+    # reaches the client.
+    display_flight = (
+        await _client_flight_mask(session, client, flight_name) if client else None
+    )
 
     # User notification
     if comment:
         user_msg = (
             f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi.\n💬 Sabab: {comment}"
-            if flight_name
+            if display_flight
             else user_text("payment-rejected-with-comment", comment=comment)
         )
     else:
         user_msg = (
             f"⚠️ To'lovingiz (Reys: {display_flight}) rad etildi. Admin bilan bog'laning."
-            if flight_name
+            if display_flight
             else user_text("payment-rejected-user")
         )
 
@@ -1144,8 +1195,6 @@ async def cash_payment_amount_received(
     data = await state.get_data()
     telegram_id = data["cash_telegram_id"]
     worksheet = data["cash_worksheet"]
-    display_worksheet = await FlightMaskService.real_to_mask(session, 1, worksheet)
-    display_worksheet = display_worksheet or worksheet
     client_code = data["cash_client_code"]
     expected_amount = data.get("cash_expected_amount", 0)
     admin_message_id = data.get("cash_message_id")
@@ -1163,6 +1212,11 @@ async def cash_payment_amount_received(
         await message.answer(_("client-not-found"))
         await state.clear()
         return
+
+    # Masked only once the client is known - the mask is per-partner.
+    display_worksheet = (
+        await _client_flight_mask(session, client, worksheet) or FLIGHT_PLACEHOLDER
+    )
 
     from src.infrastructure.tools.datetime_utils import get_current_time
     from src.bot.handlers.user.make_payment import calculate_flight_payment
@@ -1185,6 +1239,13 @@ async def cash_payment_amount_received(
     total_expected = payment_data["total_payment"] if payment_data else expected_amount
 
     # --- Persist payment ---
+    # Audit columns store the AdminAccount PK, not the Telegram id — resolve
+    # before writing so the cashier log can attribute this payment.
+    approver_telegram_id = message.from_user.id if message.from_user else None
+    approver_admin_pk = await resolve_admin_pk_by_telegram_id(
+        session, approver_telegram_id
+    )
+
     if is_partial and existing_tx_id:
         existing_tx = await ClientTransactionDAO.get_by_id(session, existing_tx_id)
         if not existing_tx:
@@ -1197,7 +1258,8 @@ async def cash_payment_amount_received(
             transaction_id=existing_tx.id,
             payment_provider="cash",
             amount=amount,
-            approved_by_admin_id=message.from_user.id,
+            approved_by_admin_id=approver_admin_pk,
+            approved_by_telegram_id=approver_telegram_id,
             payment_type="cash",
         )
         await PaymentAllocationService.recalculate_transaction_balance(
@@ -1285,7 +1347,8 @@ async def cash_payment_amount_received(
             transaction_id=new_tx.id,
             payment_provider="cash",
             amount=amount,
-            approved_by_admin_id=message.from_user.id,
+            approved_by_admin_id=approver_admin_pk,
+            approved_by_telegram_id=approver_telegram_id,
             payment_type="cash",
         )
     await session.commit()

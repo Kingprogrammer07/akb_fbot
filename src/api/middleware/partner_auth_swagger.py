@@ -38,7 +38,10 @@ def custom_openapi(app: FastAPI):
         if (
             path.startswith("/api/v1/admin")
             or path.startswith("/api/v1/statistics")
-            or path.startswith("/api/v1/payments/process-bulk")
+            # Covers /payments/process, /process-existing and /process-bulk —
+            # all three now require the admin JWT.  One prefix, so the security
+            # requirement is never appended twice to the same operation.
+            or path.startswith("/api/v1/payments/process")
             or path.startswith("/api/v1/payments/adjust-balance")
             or path.startswith("/api/v1/payments/cashier-log")
             or path.startswith("/api/v1/payments/all-cashier-logs")

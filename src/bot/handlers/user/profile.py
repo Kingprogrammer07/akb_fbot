@@ -385,8 +385,15 @@ async def payment_reminder_handler(
     # Build reminder message
     from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+    from src.bot.utils.flight_token import client_token_scope, flight_token
+    from src.infrastructure.services.flight_display import FlightDisplay
+
     reminder_parts = []
     builder = InlineKeyboardBuilder()
+    display = await FlightDisplay.for_client(
+        session, client.active_codes, mint_missing=True
+    )
+    scope = client_token_scope(client.id)
 
     for tx in partial_transactions:
         total = float(tx.total_amount) if tx.total_amount else float(tx.summa or 0)
@@ -398,9 +405,12 @@ async def payment_reminder_handler(
             else _("not-set")
         )
 
+        # Partner mask only (minted for the client's own transaction when
+        # missing) — the real flight name must not reach the client.
+        display_flight = await display.label(session, tx.reys)
         reminder_text = _(
             "payment-reminder-item",
-            flight=tx.reys,
+            flight=display_flight,
             total=f"{total:,.0f}",
             paid=f"{paid:,.0f}",
             remaining=f"{remaining:,.0f}",
@@ -410,8 +420,8 @@ async def payment_reminder_handler(
 
         # Add payment button for this flight
         builder.button(
-            text=_("btn-make-payment-now") + f" - {tx.reys}",
-            callback_data=f"pay_flight:{tx.reys}",
+            text=_("btn-make-payment-now") + f" - {display_flight}",
+            callback_data=f"pay_flight:{flight_token(tx.reys, scope)}",
         )
 
     # Add warning text

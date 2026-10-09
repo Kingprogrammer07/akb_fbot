@@ -40,6 +40,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -48,7 +49,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_db, get_redis
+from src.api.dependencies import get_db, get_redis, require_permission
 from src.config import config
 from src.infrastructure.database.models.cargo_item import CargoItem
 from src.infrastructure.database.models.partner_shipment_temp import PartnerShipmentTemp
@@ -171,11 +172,13 @@ async def _verify_partner_key(request: Request) -> None:
 
 @router.get(
     "/temp-list",
+    # Staff only: the records carry real flight names and client codes.
+    dependencies=[Depends(require_permission("expected_cargo", "manage"))],
     summary="View temporary shipment records (Admin)",
     description="Fetch latest records pushed by China partner to the temporary DB table.",
 )
 async def get_temp_shipments(
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     session: AsyncSession = Depends(get_db),
 ):
     query = (

@@ -43,11 +43,11 @@ from src.config import config, BASE_DIR
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.delivery_request import DeliveryRequestDAO
 from src.infrastructure.database.dao.expected_cargo import ExpectedFlightCargoDAO
-from src.infrastructure.services.flight_mask import FlightMaskService
-from src.infrastructure.services.partner_resolver import (
-    get_resolver,
-    PartnerNotFoundError,
+from src.infrastructure.services.flight_display import (
+    FlightDisplay,
+    resolve_partner_for_codes,
 )
+from src.infrastructure.services.flight_mask import FlightMaskService
 from src.infrastructure.services.payment_card import PaymentCardService
 
 router = APIRouter(prefix="/user/delivery", tags=["user-delivery"])
@@ -62,13 +62,7 @@ async def _normalize_flight(
     """Translate a partner-mask flight identifier to its real DB value."""
     if not client.active_codes or not flight_input:
         return flight_input
-    partner = None
-    for code in client.active_codes:
-        try:
-            partner = await get_resolver().resolve_by_client_code(session, code)
-            break
-        except PartnerNotFoundError:
-            continue
+    partner = await resolve_partner_for_codes(session, client.active_codes)
     if not partner:
         return flight_input
     return await FlightMaskService.normalize_flight_input(
@@ -267,18 +261,21 @@ async def get_delivery_history(
         session, client.id, size, offset
     )
     
-    # Mask flight names in history
+    # Mask flight names in history — never render the real name, so an
+    # entry with no resolvable mask degrades to the generic placeholder.
+    # ``flight_names`` stores the normalised ``/request/*`` bodies, i.e. user
+    # input, so an alias is never minted from it.
+    display = await FlightDisplay.for_client(session, client.active_codes)
     for req in requests:
         if req.flight_names:
             try:
                 flight_names_list = json.loads(req.flight_names)
-                masked_flights = []
-                for f in flight_names_list:
-                    m = await FlightMaskService.real_to_mask(session, 1, f)
-                    masked_flights.append(m or f)
-                req.flight_names = json.dumps(masked_flights, ensure_ascii=False)
             except json.JSONDecodeError:
-                pass
+                continue
+            masked_flights = [
+                await display.label(session, f) for f in flight_names_list
+            ]
+            req.flight_names = json.dumps(masked_flights, ensure_ascii=False)
 
     total_count = await DeliveryRequestDAO.count_by_client(session, client.id)
 
@@ -339,6 +336,11 @@ async def get_paid_flights(
             merged_flight_names.append(flight_name)
 
     paid_flights: list[FlightItem] = []
+    # Every candidate was read from this client's own Sheets or DB rows, so a
+    # paid flight without an alias gets one minted.
+    display = await FlightDisplay.for_client(
+        session, client.active_codes, mint_missing=True
+    )
 
     for flight_name in merged_flight_names:
         is_paid = await ClientTransactionDAO.check_payment_exists(
@@ -346,12 +348,22 @@ async def get_paid_flights(
             client_code=client.active_codes,
             reys=flight_name,
         )
-        if is_paid:
-            display_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
-            paid_flights.append(FlightItem(
-                flight_name=display_name or flight_name,
-                display_name=display_name or flight_name,
-            ))
+        if not is_paid:
+            continue
+        # ``flight_name`` is the identifier the frontend sends back to
+        # ``/request/*``, which resolves it via ``mask_to_real``.  A
+        # placeholder would not round-trip, so a flight that still has no
+        # mask (no partner, or a name too long for an alias) is omitted
+        # rather than offered as an unusable (or leaking) entry.
+        masked = await display.mask(session, flight_name)
+        if not masked:
+            logger.warning(
+                "paid-flights: hiding a flight from client %s — no partner mask "
+                "could be resolved or minted",
+                client.primary_code,
+            )
+            continue
+        paid_flights.append(FlightItem(flight_name=masked, display_name=masked))
 
     return PaidFlightsResponse(flights=paid_flights)
 
@@ -412,9 +424,13 @@ async def calculate_uzpost(
     )
 
 
-async def _check_rate_limit(session: AsyncSession, client_id: int, requesting_flights: list[str]):
-    """Check if the user requested any of these flights within the last hour."""
-    recent_requests = await DeliveryRequestDAO.get_recent_requests_by_client(session, client_id, hours=1)
+async def _check_rate_limit(session: AsyncSession, client, requesting_flights: list[str]):
+    """Check if the user requested any of these flights within the last hour.
+
+    Takes the whole client because the 429 message names the offending
+    flights, and naming them safely needs the client's partner.
+    """
+    recent_requests = await DeliveryRequestDAO.get_recent_requests_by_client(session, client.id, hours=1)
 
     for req in recent_requests:
         if not req.flight_names:
@@ -424,10 +440,13 @@ async def _check_rate_limit(session: AsyncSession, client_id: int, requesting_fl
             if overlap := set(requesting_flights).intersection(
                 set(req_flights)
             ):
-                masked = []
-                for f in overlap:
-                    m = await FlightMaskService.real_to_mask(session, 1, f)
-                    masked.append(m or f)
+                display = await FlightDisplay.for_client(
+                    session, client.active_codes
+                )
+                masked = [
+                    await display.label(session, f, ordinal=i)
+                    for i, f in enumerate(sorted(overlap), start=1)
+                ]
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail=f"Siz {', '.join(masked)} reys(lar)i uchun so'nggi 1 soat ichida zayavka yuborgansiz. Iltimos biroz kuting."
@@ -448,7 +467,7 @@ async def submit_standard_delivery(
     """
     _validate_profile(client)
     real_flight_names = [await _normalize_flight(session, client, f) for f in body.flight_names]
-    await _check_rate_limit(session, client.id, real_flight_names)
+    await _check_rate_limit(session, client, real_flight_names)
 
     delivery_request = await DeliveryRequestDAO.create(
         session=session,
@@ -516,7 +535,7 @@ async def submit_uzpost_delivery(
         ) from e
 
     real_flight_names = [await _normalize_flight(session, client, f) for f in flight_names_list]
-    await _check_rate_limit(session, client.id, real_flight_names)
+    await _check_rate_limit(session, client, real_flight_names)
 
     # Validate wallet usage
     if wallet_used > 0:

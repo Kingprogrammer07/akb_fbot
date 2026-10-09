@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.database.dao.cargo_item import CargoItemDAO
 from src.infrastructure.database.models.cargo_item import CargoItem
+from src.infrastructure.tools.datetime_utils import to_tashkent
 
 
 class CargoItemService:
@@ -107,7 +108,9 @@ class CargoItemService:
             merged = {
                 'id': primary.id,
                 'track_code': primary.track_code,
-                'flight_name': primary.flight_name or flight_name,
+                # The row's own name, never the lookup string, which may come
+                # from a request.
+                'flight_name': primary.flight_name,
                 'client_id': primary.client_id or client_id,
                 'item_name_cn': (post.item_name_cn if post and post.item_name_cn else None) or (pre.item_name_cn if pre else None),
                 'item_name_ru': (post.item_name_ru if post and post.item_name_ru else None) or (pre.item_name_ru if pre else None),
@@ -141,7 +144,9 @@ class CargoItemService:
             merged_items.append({
                 'id': leftover_fc.id,
                 'track_code': f"EXTRA_{leftover_fc.id}",
-                'flight_name': flight_name,
+                # The row's own name: ``flight_name`` is the lookup string, which
+                # may come from a request and differ from the stored name in case.
+                'flight_name': leftover_fc.flight_name,
                 'client_id': client_id,
                 'item_name_cn': "Qo'shimcha yuk",
                 'item_name_ru': "Дополнительный груз",
@@ -155,7 +160,8 @@ class CargoItemService:
                 'exchange_rate': str(int(usd_rate_decimal)),
                 'checkin_status': 'post',
                 'pre_checkin_date': None,
-                'post_checkin_date': leftover_fc.created_at,
+                # A Tashkent business date, like the imported check-in dates.
+                'post_checkin_date': to_tashkent(leftover_fc.created_at).strftime('%Y-%m-%d'),
                 'is_sent_web': leftover_fc.is_sent_web,
                 'is_taken_away': is_taken_away,
                 'taken_away_date': taken_away_date,
@@ -163,13 +169,47 @@ class CargoItemService:
 
         return merged_items
 
-    async def search_by_track_code(self, track_code: str, session: AsyncSession) -> dict:
+    async def search_by_track_code(
+        self,
+        track_code: str,
+        session: AsyncSession,
+        allowed_client_codes: set[str] | None = None,
+    ) -> dict:
+        """Look up cargo items by track code.
+
+        Args:
+            track_code: Track code to search for.
+            session: Database session.
+            allowed_client_codes: When given, only items whose ``client_id`` is
+                one of these codes are returned; anything else reports as not
+                found. Callers acting on behalf of an end user MUST pass the
+                caller's own ``Client.active_codes`` — track codes are visible
+                to whoever handles the parcel, so an unscoped lookup exposes
+                another client's weight, payment state and dates. ``None``
+                means unrestricted and is reserved for admin tooling. Codes
+                are compared trimmed and uppercased on both sides, because
+                imported ``client_id`` values carry stray padding and case.
+
+        Returns:
+            Dict with ``found``, ``items`` (merged/enriched) and ``total_count``.
+        """
         all_items = await CargoItemDAO.get_by_track_code(session, track_code)
+        if allowed_client_codes is not None:
+            # Blank codes are dropped from the allowed set, so items with no
+            # usable client_id cannot be attributed to the caller and stay
+            # hidden rather than being shown to everyone.
+            allowed = {code.strip().upper() for code in allowed_client_codes} - {""}
+            all_items = [
+                item for item in all_items
+                if (item.client_id or "").strip().upper() in allowed
+            ]
         if not all_items:
             return {'found': False, 'items': [], 'total_count': 0}
-        
-        # Take client_id and flight_name from the first item to fetch flight_cargos context
-        client_id = all_items[0].client_id
+
+        # Take client_id and flight_name from the first item to fetch flight_cargos context.
+        # The enrichment lookups compare upper(column) == value.upper() without trimming,
+        # so the padding imports leave on client_id has to go first; blank stays None.
+        client_id = (all_items[0].client_id or "").strip().upper() or None
         flight_name = all_items[0].flight_name
 
         merged_items = await self._merge_and_enrich_items(session, all_items, client_id, flight_name)

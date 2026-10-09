@@ -13,6 +13,12 @@ class ProcessPaymentRequest(BaseModel):
     Request to process a payment (cash or online) for unpaid cargo.
 
     REQUIRED: paid_amount must be provided by admin.
+
+    The acting admin is NOT part of this schema.  Attribution is taken from the
+    verified ``AdminJWTPayload.admin_id`` supplied by ``require_permission`` in
+    the router, so a cashier cannot book a payment under another admin's name.
+    A legacy ``admin_id`` sent by an older client is silently ignored (Pydantic
+    drops unknown fields by default).
     """
     client_code: str = Field(..., min_length=1, max_length=20)
     cargo_id: int = Field(..., gt=0, description="FlightCargo.id")
@@ -26,7 +32,6 @@ class ProcessPaymentRequest(BaseModel):
         gt=0,
         description="Actual amount paid by client (required, in UZS)"
     )
-    admin_id: int = Field(..., gt=0, description="Admin's Telegram ID")
     use_balance: bool = Field(
         default=False,
         description="If True, deduct from client wallet balance first"
@@ -61,6 +66,9 @@ class ProcessExistingTransactionPaymentRequest(BaseModel):
     Request to process payment for existing transaction (partial payments).
 
     REQUIRED: paid_amount must be provided by admin.
+
+    As with :class:`ProcessPaymentRequest`, the acting admin is taken from the
+    verified JWT, never from the body.
     """
     transaction_id: int = Field(..., gt=0)
     payment_type: Literal["cash", "click", "payme", "card"]
@@ -69,7 +77,6 @@ class ProcessExistingTransactionPaymentRequest(BaseModel):
         gt=0,
         description="Actual amount paid by client (required, in UZS)"
     )
-    admin_id: int = Field(..., gt=0)
     use_balance: bool = Field(
         default=False,
         description="If True, deduct from client wallet balance first"
@@ -140,7 +147,10 @@ class PaymentEvent(BaseModel):
     transaction_id: int
     amount: float = Field(..., description="Actual amount paid in this event")
     payment_provider: Literal["cash", "click", "payme", "card"]
-    approved_by_admin_id: Optional[int] = None
+    approved_by_admin_id: Optional[int] = Field(
+        None,
+        description="AdminAccount DB primary key of the admin who booked this event"
+    )
     created_at: datetime
 
 

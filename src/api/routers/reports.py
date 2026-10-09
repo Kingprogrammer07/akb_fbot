@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.dependencies import get_db, get_current_user, get_translator
 from src.api.schemas.cargo import ReportResponse
 from src.api.services.report_service import ReportService
+from src.api.utils.authz import assert_owns_client_code
 from src.infrastructure.database.models.client import Client
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -31,6 +32,7 @@ async def get_web_flights(
     - Supports pagination via page/size query params
     """
     clean_client = client_code.strip().upper()
+    assert_owns_client_code(current_user, clean_client)
     service = ReportService()
     return await service.get_client_flights(session, clean_client, page, size)
 
@@ -59,6 +61,7 @@ async def get_web_history(
     - Returns weight, price, photos, date, and track codes
     """
     clean_client = client_code.strip().upper()
+    assert_owns_client_code(current_user, clean_client)
     clean_flight = flight_name.strip().upper() if flight_name else None
     service = ReportService()
     return await service.get_client_history(session, clean_client, page, clean_flight, size)

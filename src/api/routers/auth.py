@@ -132,6 +132,21 @@ async def _notify_login_telegram(
         logger.error("China address images failed for %s: %s", telegram_id, e)
 
 
+def _rejected_fields(error: Exception) -> str:
+    """Names of the fields a failed validation rejected, never their values.
+
+    ``str(ValidationError)`` quotes the input it rejected - passport series,
+    PINFL, phone number - and that string used to be returned in the 400 body
+    and stored with it in ``api_request_logs``.
+    """
+    if isinstance(error, ValidationError):
+        names = {
+            str(item["loc"][-1]) for item in error.errors() if item.get("loc")
+        }
+        return ", ".join(sorted(names))
+    return ""
+
+
 # ─── Helper: Register notifications (background, never raises) ───────────────
 
 
@@ -530,9 +545,19 @@ async def register(
             date_of_birth=dob,
         )
     except (ValidationError, ValueError) as e:
+        fields = _rejected_fields(e)
+        logger.warning(
+            "Registration rejected for telegram_id=%s: invalid %s",
+            telegram_id,
+            fields or "submission",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_("api-error-invalid-data", error=str(e)),
+            detail=(
+                _("api-error-invalid-fields", fields=fields)
+                if fields
+                else _("api-error-invalid-submission")
+            ),
         )
 
     # ── 2. Check unique constraints (main Client table) ───────────────────────
@@ -604,7 +629,7 @@ async def register(
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_("api-error-registration-failed", error=str(e)),
+            detail=_("api-error-registration-retry"),
         )
 
     # ── 5. Referral data from Redis ───────────────────────────────────────────
@@ -648,7 +673,7 @@ async def register(
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_("api-error-registration-failed", error=str(e)),
+            detail=_("api-error-registration-retry"),
         )
 
     # ── 7. Analytics event (CRITICAL — but non-blocking on failure) ───────────

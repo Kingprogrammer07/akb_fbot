@@ -149,7 +149,7 @@ async def get_cashier_log(
 
     Returns payment events from ALL cashiers so that any cashier on shift can
     detect duplicate-payment risks before processing a new transaction.  Each
-    item carries a non-null ``cashier_id`` (Admin DB PK) so the caller can
+    item carries a ``cashier_id`` (Admin DB PK) so the caller can
     identify who processed each event; the frontend uses this to colour-code
     entries by cashier.
 
@@ -371,8 +371,11 @@ async def get_all_cashier_logs(
     """
     Super-admin aggregate cashier log.
 
-    Returns payment events created by ALL cashiers (i.e. all rows where
-    ``approved_by_admin_id IS NOT NULL``).  The personal endpoint
+    Returns payment events created by ALL cashiers — every row, with no
+    filter on ``approved_by_admin_id``.  Rows booked by a bot operator who has
+    no ``admin_accounts`` row come back with ``cashier_id: null``; they are
+    deliberately still listed, and ``client_payment_events.approved_by_telegram_id``
+    identifies the operator.  The personal endpoint
     ``GET /payments/cashier-log`` remains unchanged — it always returns
     only the caller's own events.
 

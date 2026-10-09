@@ -7,7 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status, File, Up
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from redis.asyncio import Redis
-from src.api.dependencies import get_translator, get_redis, get_admin_user
+from src.api.dependencies import (
+    AdminJWTPayload,
+    get_redis,
+    get_translator,
+    require_permission,
+)
 from src.api.utils.constants import resolve_region_code
 from src.bot.bot_instance import bot
 from src.infrastructure.database.client import DatabaseClient
@@ -33,6 +38,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
+# Staff-only routes: the admin panel sends X-Admin-Authorization on every call.
+_RequireClientsRead = Depends(require_permission("clients", "read"))
+_RequireClientsUpdate = Depends(require_permission("clients", "update"))
+_RequireClientsDelete = Depends(require_permission("clients", "delete"))
+
 
 CONFLICT_KEYS = {
     "pinfl": "conflict-pinfl",
@@ -50,6 +60,28 @@ async def get_session(request: Request):
 
     async with db_client.session_factory() as session:
         yield session
+
+
+async def _require_admin_permission(
+    admin: AdminJWTPayload,
+    permission: str,
+    session: AsyncSession,
+    redis: Redis,
+) -> None:
+    """Enforce a permission that only some request bodies need.
+
+    Same rule as ``require_permission``: super-admin passes, any other role
+    must hold ``permission``.
+    """
+    if admin.role_name == "super-admin":
+        return
+    from src.infrastructure.services.admin_rbac_service import RBACService
+
+    if permission not in await RBACService.get_permissions(redis, session, admin.role_name):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Insufficient permissions. Requires: {permission}",
+        )
 
 
 def parse_passport_file_ids(passport_images_json: Optional[str]) -> list[str]:
@@ -203,6 +235,7 @@ async def preview_client_code_endpoint(
     district: str = Query(""),
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
+    _admin: AdminJWTPayload = _RequireClientsRead,
 ):
     """
     Frontend'da jonli (live) tarzda keyingi bo'sh kod qanaqa bo'lishini ko'rsatish uchun API.
@@ -236,7 +269,7 @@ async def get_client(
     client_id: int,
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    # _admin=Depends(get_admin_user),
+    _admin: AdminJWTPayload = _RequireClientsRead,
 ):
     """
     Get client by ID.
@@ -286,7 +319,7 @@ async def get_passport_images_metadata(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     _: callable = Depends(get_translator),
-    # _admin=Depends(get_admin_user),
+    _admin: AdminJWTPayload = _RequireClientsRead,
 ):
     """
     Get metadata for all passport images of a client.
@@ -389,7 +422,7 @@ async def resolve_passport_image(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     _: callable = Depends(get_translator),
-    # _admin=Depends(get_admin_user),
+    _admin: AdminJWTPayload = _RequireClientsRead,
 ):
     """
     Resolve a single passport image file_id.
@@ -500,7 +533,7 @@ async def create_client(
     passport_images: list[UploadFile] = File(default=[]),
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    # _admin=Depends(get_admin_user),
+    _admin: AdminJWTPayload = _RequireClientsUpdate,
 ):
     """
     Create a new client.
@@ -667,7 +700,8 @@ async def update_client(
     adjustment_type: Optional[str] = Form(None, description="Must be 'bonus', 'penalty', or 'silent'"),
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    # _admin=Depends(get_admin_user),
+    admin: AdminJWTPayload = _RequireClientsUpdate,
+    redis: Redis = Depends(get_redis),
 ):
     """
     Update an existing client.
@@ -675,6 +709,10 @@ async def update_client(
     Supports updating client_code (must be unique) and telegram_id (auto-relink).
     Supports balance adjustments: bonus (visible), penalty (visible), silent (hidden SYS_ADJ).
     """
+    # A balance adjustment moves money, so it needs more than a profile edit;
+    # checked before anything is uploaded or written.
+    if adjustment_amount is not None or adjustment_type is not None:
+        await _require_admin_permission(admin, "clients:finance_update", session, redis)
 
     # 1. Asosiy clientni topish
     client = await ClientDAO.get_by_id(session, client_id)
@@ -877,7 +915,7 @@ async def delete_client(
     client_id: int,
     session: AsyncSession = Depends(get_session),
     _: callable = Depends(get_translator),
-    # _admin=Depends(get_admin_user),
+    _admin: AdminJWTPayload = _RequireClientsDelete,
 ):
     """
     Delete a client by ID.

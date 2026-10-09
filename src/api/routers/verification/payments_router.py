@@ -1,11 +1,25 @@
-"""Payments router for processing new payments."""
+"""Payments router for processing new payments.
+
+Shares the ``/payments`` prefix with the POS cashier router, and therefore its
+``pos`` RBAC resource.
+
+Authentication: Admin JWT via the ``X-Admin-Authorization`` header.
+Authorization:  RBAC permissions:
+  • pos:process — POST /payments/process, POST /payments/process-existing
+  • pos:read    — GET  /payments/cards, GET /payments/active-cards/random
+"""
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_db, get_translator
+from src.api.dependencies import (
+    AdminJWTPayload,
+    get_db,
+    get_translator,
+    require_permission,
+)
 from src.api.services.verification import PaymentService
 from src.api.services.verification.payment_service import PaymentServiceError
 from src.infrastructure.database.dao.payment_card import PaymentCardDAO
@@ -31,19 +45,14 @@ class CardWithBalanceItem(BaseModel):
     payment_count: int
 
 
-async def require_admin():
-    """
-    Stub for admin permission check.
+# ============================================================================
+# Authorization
+# ============================================================================
 
-    Admin is identified by:
-    1. clients.role in ['admin', 'super-admin'] in database
-    2. telegram_id in config.telegram.admin_ids
-
-    For WebApp: Can use Telegram initData validation.
-    For now: stub that allows all requests.
-    """
-    pass
-
+# Money-moving routes take the counter write scope; card lookups are read-only
+# cashier data. Both mirror the POS router that shares this prefix.
+_RequirePosProcess = Depends(require_permission("pos", "process"))
+_RequirePosRead = Depends(require_permission("pos", "read"))
 # ============================================================================
 # Payment Processing Endpoints
 # ============================================================================
@@ -62,9 +71,9 @@ async def require_admin():
 )
 async def process_payment(
     request: ProcessPaymentRequest,
+    admin: AdminJWTPayload = _RequirePosProcess,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin)
 ) -> ProcessPaymentResponse:
     """
     Process payment for unpaid cargo.
@@ -75,7 +84,12 @@ async def process_payment(
     - `flight`: Flight name
     - `payment_type`: 'cash', 'click', or 'payme'
     - `paid_amount`: Actual amount paid by client (REQUIRED, in UZS)
-    - `admin_id`: Admin's Telegram ID
+
+    **Authorization**: requires the `pos:process` permission. The approving
+    admin is read from the verified JWT (`AdminJWTPayload.admin_id`, an
+    AdminAccount DB primary key) and written to
+    `client_payment_events.approved_by_admin_id`; an `admin_id` in the body is
+    ignored.
 
     **Payment types**:
     - `cash`: Cash payment - cargo is automatically marked as taken
@@ -102,7 +116,8 @@ async def process_payment(
         return await PaymentService.process_unpaid_cargo_payment(
             request=request,
             session=session,
-            translator=_
+            translator=_,
+            admin_id=admin.admin_id,
         )
 
     except PaymentServiceError as e:
@@ -143,9 +158,9 @@ async def process_payment(
 )
 async def process_existing_payment(
     request: ProcessExistingTransactionPaymentRequest,
+    admin: AdminJWTPayload = _RequirePosProcess,
     session: AsyncSession = Depends(get_db),
     _: callable = Depends(get_translator),
-    _admin: None = Depends(require_admin)
 ) -> ProcessPaymentResponse:
     """
     Process payment for existing transaction (partial payments).
@@ -154,7 +169,9 @@ async def process_existing_payment(
     - `transaction_id`: Existing transaction ID
     - `payment_type`: 'cash', 'click', or 'payme'
     - `paid_amount`: Actual amount paid by client (REQUIRED, in UZS)
-    - `admin_id`: Admin's Telegram ID
+
+    **Authorization**: requires the `pos:process` permission. The approving
+    admin is read from the verified JWT, not from the body.
 
     Use this endpoint when:
     - A transaction exists but is only partially paid
@@ -178,7 +195,8 @@ async def process_existing_payment(
         return await PaymentService.process_existing_transaction_payment(
             request=request,
             session=session,
-            translator=_
+            translator=_,
+            admin_id=admin.admin_id,
         )
 
     except PaymentServiceError as e:
@@ -216,8 +234,8 @@ async def process_existing_payment(
     description="Returns all company payment cards (active and inactive) with their total collected amount.",
 )
 async def get_cards_with_balance(
+    admin: AdminJWTPayload = _RequirePosRead,
     session: AsyncSession = Depends(get_db),
-    _admin: None = Depends(require_admin),
 ) -> list[CardWithBalanceItem]:
     """List all payment cards with SUM(payment_events.amount) as balance."""
     rows = await PaymentCardDAO.get_all_with_balance(session)
@@ -238,8 +256,8 @@ async def get_cards_with_balance(
     description="Returns a random active payment card for card payments."
 )
 async def get_random_active_card(
+    admin: AdminJWTPayload = _RequirePosRead,
     session: AsyncSession = Depends(get_db),
-    _admin: None = Depends(require_admin)
 ) -> ActiveCardResponse:
     """
     Get a random active payment card.

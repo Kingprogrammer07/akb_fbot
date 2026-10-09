@@ -61,14 +61,15 @@ from src.infrastructure.database.dao.partner_static_data import (
     PartnerStaticDataDAO,
 )
 from src.infrastructure.database.dao.static_data import StaticDataDAO
+from src.infrastructure.services.flight_display import (
+    FlightDisplay,
+    flight_mask_for_client,
+    resolve_partner_for_codes,
+)
 from src.infrastructure.services.flight_mask import (
     FlightMaskConflictError,
     FlightMaskError,
     FlightMaskService,
-)
-from src.infrastructure.services.partner_resolver import (
-    PartnerNotFoundError,
-    get_resolver,
 )
 from src.infrastructure.tools.s3_manager import s3_manager
 
@@ -846,18 +847,16 @@ class BulkCargoSender:
                 # partners (including ``GGX`` for the AKB Xorazm filiali) are
                 # forwarded to ``partner.group_chat_id``; DM partners (AKB)
                 # fall through to the direct-message flow below.
-                partner = None
-                _client_for_group = await ClientDAO.get_by_client_code(session, client_id)
-                _group_codes_to_try = _client_for_group.active_codes if _client_for_group else [client_id]
-                for _code in _group_codes_to_try:
-                    try:
-                        partner = await get_resolver().resolve_by_client_code(
-                            session, _code
-                        )
-                        break
-                    except PartnerNotFoundError:
-                        continue
-                
+                _client_for_group = await ClientDAO.get_by_client_code(
+                    session, client_id
+                )
+                partner = await resolve_partner_for_codes(
+                    session,
+                    _client_for_group.active_codes
+                    if _client_for_group
+                    else client_id,
+                )
+
                 if partner is None:
                     error_reason = f"Partner not registered for {client_id}"
                     self.stats.failed += 1
@@ -996,29 +995,18 @@ class BulkCargoSender:
                 track_codes.append(code)
                 seen_upper.add(code.upper())
 
-        # Resolve the partner-specific payment methods (cards + links).  The
-        # resolver is called once more here even though _process_client also
-        # uses it; PartnerResolver's internal cache makes this a near-free
-        # dict lookup.  Falls back to the global ``payment_cards`` pool when
-        # the partner has no card configured yet — preserves current
-        # behaviour for any partner whose admin has not migrated their cards
-        # to the new ``partner_payment_methods`` table.
+        # Resolve the partner once: it drives both the payment methods
+        # (cards + links) and the flight mask below.  PartnerResolver's
+        # internal cache makes the lookup a near-free dict hit even though
+        # _process_client resolves the same client.  Every alias of the
+        # client is tried, since only one of them may carry a known prefix.
         partner_payment_card = None
         partner_payment_links: list[tuple[str, str]] = []
-        _partner_for_payment = None
-        
-        # Resolve client to try all aliases
-        _client_for_payment = await ClientDAO.get_by_client_code(session, client_id)
-        _codes_to_try = _client_for_payment.active_codes if _client_for_payment else [client_id]
-        
-        for _code in _codes_to_try:
-            try:
-                _partner_for_payment = await get_resolver().resolve_by_client_code(
-                    session, _code
-                )
-                break
-            except PartnerNotFoundError:
-                continue
+        _client_for_partner = await ClientDAO.get_by_client_code(session, client_id)
+        _codes_to_try = (
+            _client_for_partner.active_codes if _client_for_partner else client_id
+        )
+        _partner_for_payment = await resolve_partner_for_codes(session, _codes_to_try)
 
         if _partner_for_payment is not None:
             partner_payment_card = (
@@ -1065,28 +1053,13 @@ class BulkCargoSender:
         if not photo_file_ids:
             return None
 
-        # Resolve the partner-specific mask for this client so the message
-        # body shows the alias rather than the real flight code.  The DAO
-        # returns ``None`` when no alias has been configured (which the
-        # admin-side review flow normally guarantees), in which case the
-        # CargoReportData default falls back to the real flight name.
-        display_flight = self.flight_name
-        partner = None
-        _client_for_mask = await ClientDAO.get_by_client_code(session, client_id)
-        _mask_codes_to_try = _client_for_mask.active_codes if _client_for_mask else [client_id]
-        for _code in _mask_codes_to_try:
-            try:
-                partner = await get_resolver().resolve_by_client_code(session, _code)
-                break
-            except PartnerNotFoundError:
-                continue
-                
-        if partner is not None:
-            mask = await FlightMaskService.real_to_mask(
-                session, partner.id, self.flight_name
-            )
-            if mask:
-                display_flight = mask
+        # Show the partner alias rather than the real flight code.  The
+        # admin alias-review flow mints one for every partner before the
+        # send starts, so a miss here means the client resolves to no
+        # partner at all - the flight is blanked rather than leaked.
+        display_flight = await FlightDisplay(_partner_for_payment).label(
+            session, self.flight_name
+        )
 
         return CargoReportData(
             client_id=client_id,
@@ -2212,17 +2185,11 @@ async def web_confirm_send(
             continue
 
         # Resolve the partner-specific mask before notifying — the user
-        # must never see the real flight name.  When no mask exists yet
+        # must never see the real flight name.  When none can be produced
         # the message drops the flight identifier entirely.
-        try:
-            partner = await get_resolver().resolve_by_client_code(
-                session, client_id
-            )
-            display_flight = await FlightMaskService.real_to_mask(
-                session, partner.id, flight_name
-            )
-        except PartnerNotFoundError:
-            display_flight = None
+        display_flight = await flight_mask_for_client(
+            session, client.active_codes, flight_name
+        )
 
         if display_flight:
             text_body = (

@@ -22,6 +22,7 @@ class ClientPaymentEventDAO:
         approved_by_admin_id: int | None = None,
         payment_type: str = 'online',  # Deprecated, kept for compatibility
         payment_card_id: int | None = None,
+        approved_by_telegram_id: int | None = None,
     ) -> ClientPaymentEvent:
         """
         Create a new payment event.
@@ -31,8 +32,16 @@ class ClientPaymentEventDAO:
             transaction_id: ID of the transaction
             payment_provider: REQUIRED - 'cash', 'card', 'click', 'payme', or 'wallet'
             amount: Payment amount
-            approved_by_admin_id: Admin who approved (optional)
+            approved_by_admin_id: AdminAccount DB primary key (admin_accounts.id)
+                of the admin who booked this payment — NOT a Telegram ID.
+                HTTP callers pass AdminJWTPayload.admin_id; bot handlers pass
+                resolve_admin_pk_by_telegram_id(...).  None when the actor has
+                no admin account — pass approved_by_telegram_id as well so the
+                row stays attributable.
             payment_type: DEPRECATED - kept for backward compatibility
+            approved_by_telegram_id: Raw Telegram user ID of the operator, for
+                bot-initiated payments. Audit-only; the cashier log never
+                filters on it. Leave None for HTTP-booked payments.
 
         Returns:
             ClientPaymentEvent: Created payment event
@@ -52,6 +61,7 @@ class ClientPaymentEventDAO:
             payment_type=payment_type,
             amount=money(amount),
             approved_by_admin_id=approved_by_admin_id,
+            approved_by_telegram_id=approved_by_telegram_id,
             payment_provider=payment_provider,
             payment_card_id=payment_card_id,
         )

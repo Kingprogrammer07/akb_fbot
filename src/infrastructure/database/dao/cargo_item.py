@@ -188,7 +188,9 @@ class CargoItemDAO:
             )
             .where(CargoItem.client_id.ilike(client_id))
             .group_by(CargoItem.flight_name)
-            .order_by(desc("last_update"))
+            # The name breaks ties, so a position names the same flight on every
+            # call: the cargo history resolves "Reys #N" by position.
+            .order_by(desc("last_update"), CargoItem.flight_name)
         )
 
         result = await session.execute(stmt)
@@ -225,7 +227,9 @@ class CargoItemDAO:
             # If flight_name is "None" string or empty, we match Is None?
             # User requirement says "view detailed cargo items for a selected flight".
             # Usually flight_name is present.
-            CargoItem.flight_name.ilike(flight_name)
+            # Compared as a name, case-insensitively: it can come from a
+            # request, and ILIKE would treat % and _ in it as wildcards.
+            func.upper(CargoItem.flight_name) == flight_name.upper()
         ]
 
         # Total count query

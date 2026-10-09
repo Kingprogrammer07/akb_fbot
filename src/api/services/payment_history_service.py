@@ -8,8 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
 from src.infrastructure.database.dao.client_payment_event import ClientPaymentEventDAO
-from src.infrastructure.services.flight_mask import FlightMaskService
-from src.infrastructure.services.partner_resolver import get_resolver, PartnerNotFoundError
+from src.infrastructure.database.models.client_transaction import NON_FLIGHT_REYS_PREFIXES
+from src.infrastructure.services.flight_display import (
+    FLIGHT_PLACEHOLDER,
+    FlightDisplay,
+)
 from src.api.schemas.payment import (
     PaymentBreakdownSchema,
     TransactionHistoryItemSchema,
@@ -37,8 +40,9 @@ async def get_client_transaction_history(
     Returns:
         TransactionHistoryResponse with items, total_count, limit, offset.
     """
-    # Fetch paginated transactions (filter_type="all" returns everything
-    # except hidden WALLET_ADJ / UZPOST pseudo-transactions).
+    # Fetch paginated transactions.  ``get_filtered_transactions`` defaults to
+    # ``include_hidden=True``, so UZPOST / WALLET_ADJ / SYS_ADJ rows are listed
+    # as well, although the count below excludes them.
     transactions = await ClientTransactionDAO.get_filtered_transactions(
         session=session,
         client_code=client_code,
@@ -54,15 +58,11 @@ async def get_client_transaction_history(
         filter_type="all",
     )
 
-    primary_code = client_code[0] if isinstance(client_code, list) and client_code else (client_code if isinstance(client_code, str) else None)
-    partner = None
-    if primary_code:
-        try:
-            partner = await get_resolver().resolve_by_client_code(session, primary_code)
-        except PartnerNotFoundError:
-            pass
+    # Every code is tried, not just the first: a client may hold a
+    # pre-conversion alias alongside its current code.  The flights come from
+    # the client's own transactions, so a missing alias is minted.
+    display = await FlightDisplay.for_client(session, client_code, mint_missing=True)
 
-    cache: dict[str, str] = {}
     items: list[TransactionHistoryItemSchema] = []
     for tx in transactions:
         # Build payment breakdown for paid / partial transactions
@@ -78,18 +78,12 @@ async def get_client_transaction_history(
                 card=float(raw.get("card", 0) or 0),
             )
 
-        real_flight = tx.reys
-        display_flight = real_flight
-        if real_flight and partner:
-            if real_flight in cache:
-                display_flight = cache[real_flight]
-            else:
-                masked = await FlightMaskService.real_to_mask(session, partner.id, real_flight)
-                if masked:
-                    cache[real_flight] = masked
-                    display_flight = masked
-                else:
-                    cache[real_flight] = real_flight
+        # The real flight name never reaches the user; a bookkeeping row names
+        # no flight and keeps the placeholder.
+        if tx.reys.startswith(NON_FLIGHT_REYS_PREFIXES):
+            display_flight = FLIGHT_PLACEHOLDER
+        else:
+            display_flight = await display.label(session, tx.reys)
 
         items.append(
             TransactionHistoryItemSchema(

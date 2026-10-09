@@ -31,6 +31,8 @@ from src.infrastructure.database.models.cargo_delivery_proof import CargoDeliver
 from src.infrastructure.database.models.partner_shipment_temp import PartnerShipmentTemp
 from src.infrastructure.database.models.expected_cargo import ExpectedFlightCargo
 from src.infrastructure.database.models.flight_schedule import FlightSchedule
+from src.infrastructure.database.models.flight_cargo import FlightCargo
+from src.infrastructure.database.models.delivery_request import DeliveryRequest
 
 # ── Partner masking models (Phase 1) ────────────────────────────────────────
 from src.infrastructure.database.models.partner import Partner
@@ -78,6 +80,8 @@ __all__ = [
     "PartnerShipmentTemp",
     "ExpectedFlightCargo",
     "FlightSchedule",
+    "FlightCargo",
+    "DeliveryRequest",
     # Partner masking models
     "Partner",
     "PartnerFlightAlias",

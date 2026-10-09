@@ -1,7 +1,10 @@
 """Delivery request (Zayavka) handlers."""
 
 import json
+from collections.abc import Callable
+
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -14,10 +17,17 @@ from src.bot.filters.is_admin import IsAdmin
 from src.bot.filters.is_private_chat import IsPrivate
 from src.bot.filters.is_logged_in import ClientExists, IsRegistered, IsLoggedIn
 from src.bot.utils.decorators import handle_errors
+from src.bot.utils.flight_token import (
+    client_token_scope,
+    flight_token,
+    resolve_flight_token,
+)
 from src.bot.utils.google_sheets_checker import GoogleSheetsChecker
 from src.infrastructure.database.dao import ClientTransactionDAO
-from src.infrastructure.services import ClientService, FlightMaskService
+from src.infrastructure.services import ClientService
+from src.infrastructure.services.flight_display import FLIGHT_PLACEHOLDER, FlightDisplay
 from src.infrastructure.database.dao.delivery_request import DeliveryRequestDAO
+from src.infrastructure.database.models.client import Client
 from src.config import config, BASE_DIR
 import math
 
@@ -26,13 +36,52 @@ special_regions = ["Qoraqalpog'iston", "Surxondaryo", "Xorazm"]
 delivery_request_router = Router(name="delivery_request")
 
 
-async def _mask_flight_names(session: AsyncSession, flights: list[str]) -> list[str]:
-    """Return masked flight names for user display (partner_id=1)."""
-    result = []
-    for f in flights:
-        m = await FlightMaskService.real_to_mask(session, 1, f)
-        result.append(m or f)
-    return result
+async def _mask_flight_names(
+    session: AsyncSession, client, flights: list[str]
+) -> list[str]:
+    """Return the labels *this* client may see for ``flights``.
+
+    ``flights`` always come from the client's own records (the paid flights
+    offered in this flow, or its own delivery requests), so a missing alias
+    is minted; only a client without a partner degrades to an ordinal
+    placeholder.  The real flight name is never rendered.
+    """
+    display = await FlightDisplay.for_client(
+        session, client.active_codes, mint_missing=True
+    )
+    return [
+        await display.label(session, f, ordinal=i)
+        for i, f in enumerate(flights, start=1)
+    ]
+
+
+def _build_flight_selection_keyboard(
+    paid_flights: list[dict[str, str]],
+    selected_flights: list[str],
+    scope: str,
+    _: Callable[..., str],
+) -> InlineKeyboardBuilder:
+    """Paid-flight toggles plus the "done" button.
+
+    Labels are the display names computed when the list was built (never the
+    real name, even for FSM data written before masking); ``callback_data``
+    carries a :func:`flight_token` minted in the client's ``scope``.
+    """
+    builder = InlineKeyboardBuilder()
+    for flight_data in paid_flights:
+        fname = flight_data["flight_name"]
+        dname = flight_data.get("display_name") or FLIGHT_PLACEHOLDER
+        checkmark = "✅ " if fname in selected_flights else ""
+        builder.button(
+            text=f"{checkmark}✈️ {dname}",
+            callback_data=f"select_flight:{flight_token(fname, scope)}",
+        )
+
+    builder.button(
+        text=_("btn-done-selecting-flights"), callback_data="flight_selection_done"
+    )
+    builder.adjust(1)
+    return builder
 
 
 def calculate_price(total_weight: float, region: str) -> int:
@@ -330,7 +379,13 @@ async def profile_confirmation_yes(
             seen_keys.add(key)
             candidate_flight_names.append(fn)
 
-    from src.infrastructure.services.flight_mask import FlightMaskService
+    # Button text is masked (minted for these own-record flights when
+    # missing; a client without a partner gets an ordinal) and
+    # ``callback_data`` carries an opaque token: reply_markup is delivered to
+    # the client, so neither may contain the real flight name.
+    display = await FlightDisplay.for_client(
+        session, client.active_codes, mint_missing=True
+    )
 
     paid_flights = []
     for flight_name in candidate_flight_names:
@@ -339,10 +394,11 @@ async def profile_confirmation_yes(
         )
 
         if is_paid:
-            display_name = await FlightMaskService.real_to_mask(session, 1, flight_name)
             paid_flights.append({
                 "flight_name": flight_name,
-                "display_name": display_name or flight_name,
+                "display_name": await display.label(
+                    session, flight_name, ordinal=len(paid_flights) + 1
+                ),
             })
 
     # If no paid flights, inform user
@@ -352,21 +408,9 @@ async def profile_confirmation_yes(
         return
 
     # Create flight selection keyboard with only paid flights
-    builder = InlineKeyboardBuilder()
-
-    for flight_data in paid_flights:
-        flight_name = flight_data["flight_name"]
-        display_name = flight_data["display_name"]
-        builder.button(
-            text=f"✈️ {display_name}", callback_data=f"select_flight:{flight_name}"
-        )
-
-    # Add "Done" button for all delivery types (multiple selection)
-    builder.button(
-        text=_("btn-done-selecting-flights"), callback_data="flights_selected_done"
+    builder = _build_flight_selection_keyboard(
+        paid_flights, [], client_token_scope(client.id), _
     )
-
-    builder.adjust(1)
 
     # All delivery types use multiple selection
     message_key = "delivery-select-flights-multiple"
@@ -382,15 +426,34 @@ async def profile_confirmation_yes(
 )
 @handle_errors
 async def process_flight_selection(
-    callback: CallbackQuery, _: callable, state: FSMContext
+    callback: CallbackQuery,
+    _: callable,
+    session: AsyncSession,
+    client_service: ClientService,
+    state: FSMContext,
 ):
     """Process flight selection - ALL delivery types use multiple selection."""
-    flight_name = callback.data.split(":")[1]
+    client = await client_service.get_client(callback.from_user.id, session)
+    if not client:
+        await callback.answer(_("error-occurred"), show_alert=True)
+        return
+    scope = client_token_scope(client.id)
 
     # Get data from state
     data = await state.get_data()
     selected_flights = data.get("selected_flights", [])
     paid_flights = data.get("paid_flights", [])
+
+    # Only the paid flights offered in this flow are selectable; the payload
+    # is client-supplied and never trusted as a flight name.
+    flight_name = resolve_flight_token(
+        callback.data.split(":", 1)[1],
+        [flight_data["flight_name"] for flight_data in paid_flights],
+        scope,
+    )
+    if flight_name is None:
+        await callback.answer(_("error-occurred"), show_alert=True)
+        return
 
     # Multiple selection mode - toggle selection
     if flight_name in selected_flights:
@@ -401,28 +464,21 @@ async def process_flight_selection(
     await state.update_data(selected_flights=selected_flights)
 
     # Rebuild keyboard with checkmarks using only paid flights
-    builder = InlineKeyboardBuilder()
-
-    for flight_data in paid_flights:
-        fname = flight_data["flight_name"]
-        dname = flight_data.get("display_name") or fname
-        checkmark = "✅ " if fname in selected_flights else ""
-        builder.button(
-            text=f"{checkmark}✈️ {dname}", callback_data=f"select_flight:{fname}"
-        )
-
-    builder.button(
-        text=_("btn-done-selecting-flights"), callback_data="flights_selected_done"
+    builder = _build_flight_selection_keyboard(
+        paid_flights, selected_flights, scope, _
     )
-    builder.adjust(1)
 
     await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
     await callback.answer()
 
 
-async def _check_rate_limit_bot(session: AsyncSession, client_id: int, requesting_flights: list[str]) -> str | None:
-    """Check if the user requested any of these flights within the last hour. Returns error message if so."""
-    recent_requests = await DeliveryRequestDAO.get_recent_requests_by_client(session, client_id, hours=1)
+async def _check_rate_limit_bot(session: AsyncSession, client, requesting_flights: list[str]) -> str | None:
+    """Check if the user requested any of these flights within the last hour. Returns error message if so.
+
+    Takes the whole client because the message names the offending flights,
+    and naming them safely needs the client's partner.
+    """
+    recent_requests = await DeliveryRequestDAO.get_recent_requests_by_client(session, client.id, hours=1)
 
     for req in recent_requests:
         if not req.flight_names:
@@ -431,7 +487,7 @@ async def _check_rate_limit_bot(session: AsyncSession, client_id: int, requestin
             req_flights = json.loads(req.flight_names)
             overlap = set(requesting_flights).intersection(set(req_flights))
             if overlap:
-                masked = await _mask_flight_names(session, list(overlap))
+                masked = await _mask_flight_names(session, client, sorted(overlap))
                 return f"Siz {', '.join(masked)} reys(lar)i uchun so'nggi 1 soat ichida zayavka yuborgansiz. Iltimos biroz kuting."
         except json.JSONDecodeError:
             pass
@@ -464,8 +520,11 @@ async def process_flight_selection_done(
 
     # Get client
     client = await client_service.get_client(callback.from_user.id, session)
-    
-    rate_limit_error = await _check_rate_limit_bot(session, client.id, selected_flights)
+    if not client:
+        await callback.answer(_("error-occurred"), show_alert=True)
+        return
+
+    rate_limit_error = await _check_rate_limit_bot(session, client, selected_flights)
     if rate_limit_error:
         await callback.answer(rate_limit_error, show_alert=True)
         return
@@ -474,7 +533,7 @@ async def process_flight_selection_done(
     if delivery_type == "uzpost":
         # Calculate total weight for UZPOST delivery
         total_weight = 0
-        display_flights = await _mask_flight_names(session, selected_flights)
+        display_flights = await _mask_flight_names(session, client, selected_flights)
 
         for flight_name in selected_flights:
             # Calculate total weight for each flight
@@ -712,7 +771,7 @@ async def uzpost_toggle_wallet(
         final_payable_amount=final_payable_amount,
     )
 
-    display_flights = await _mask_flight_names(session, selected_flights)
+    display_flights = await _mask_flight_names(session, client, selected_flights)
 
     # Get payment card info
     from src.infrastructure.services import PaymentCardService
@@ -795,15 +854,35 @@ async def uzpost_wallet_only_submit(
     bot: Bot,
     redis: Redis,
 ):
-    """Handle UZPOST wallet-only delivery payment — no receipt needed, sends to admin."""
-    await callback.answer()
+    """Handle UZPOST wallet-only delivery payment — no receipt needed, sends to admin.
 
-    # Get client
+    Every path answers the callback exactly once.  ``handle_errors`` answers
+    any other failure itself but only logs a Telegram error, so the press is
+    answered here before such an error propagates.
+    """
     client = await client_service.get_client(callback.from_user.id, session)
     if not client:
         await callback.answer(_("error-occurred"), show_alert=True)
         return
 
+    try:
+        await _submit_uzpost_wallet_only(callback, _, session, client, state, bot, redis)
+    except TelegramBadRequest:
+        await callback.answer()
+        raise
+    await callback.answer()
+
+
+async def _submit_uzpost_wallet_only(
+    callback: CallbackQuery,
+    _: callable,
+    session: AsyncSession,
+    client: Client,
+    state: FSMContext,
+    bot: Bot,
+    redis: Redis,
+) -> None:
+    """Send a wallet-only UZPOST delivery request to staff; the caller answers."""
     # Get data from state
     data = await state.get_data()
     selected_flights = data.get("selected_flights", [])

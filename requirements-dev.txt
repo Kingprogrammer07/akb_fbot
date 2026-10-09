@@ -1,0 +1,7 @@
+# Development and test dependencies.
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Not installed in production images — the runtime needs none of these.
+pytest==8.3.4
+pytest-asyncio==0.24.0
+fakeredis==2.26.2

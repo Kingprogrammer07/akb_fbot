@@ -37,15 +37,16 @@ _PERMISSION_DEFINITIONS: dict[str, list[str]] = {
     # Audit log access — read-only; write is performed by the system internally.
     "audit_logs":      ["read"],
     # clients:finance_read  →  GET  /admin/clients/{id}/finances + payment-detail + flights
-    # clients:finance_update is reserved for future balance correction endpoints.
-    "clients":        ["read", "verify", "update", "ban", "finance_read", "finance_update"],
+    # clients:finance_update  →  balance adjustments on PUT /clients/{id}
+    # clients:delete          →  DELETE /clients/{id} (hard delete)
+    "clients":        ["read", "verify", "update", "ban", "finance_read", "finance_update", "delete"],
     "cargo":          ["read", "create", "update", "delete"],
     "payments":       ["read", "approve", "reject", "export"],
     "flights":        ["read", "create", "update", "delete"],
     # POS (Point of Sale) Fast Cashier — intentionally a separate resource so
     # that a "Cashier" role can be granted counter-specific write access without
     # inheriting the broader payment admin operations (approve refunds, export).
-    # pos:process  →  POST /payments/process-bulk
+    # pos:process  →  POST /payments/process, /process-existing, /process-bulk
     # pos:read     →  GET  /payments/cashier-log
     # pos:adjust   →  POST /payments/adjust-balance
     "pos":            ["process", "read", "adjust", "update_status"],
@@ -77,6 +78,8 @@ _PERMISSION_DEFINITIONS: dict[str, list[str]] = {
     # partners:manage -> partner settings, payment methods, foto_hisobot,
     # and flight aliases.
     "partners":        ["manage"],
+    # statistics:read -> /statistics/* and /operational/* (dashboards and exports).
+    "statistics":      ["read"],
 }
 
 
@@ -161,6 +164,10 @@ _ROLE_DEFINITIONS: dict[str, dict] = {
             "pos:adjust",
             "pos:update_status",
             "auth:passkey",  # Face ID / hardware key for payment counter login
+            # Look up the client at the counter (/verification/*) and read the
+            # transaction history being settled (/transactions/*).
+            "clients:read",
+            "cargo:read",
         ],
     },
     "manager": {
@@ -173,6 +180,8 @@ _ROLE_DEFINITIONS: dict[str, dict] = {
             "clients:read",
             "clients:update",
             "clients:finance_read",
+            # Read the client's transaction list and detail (/transactions/*).
+            "cargo:read",
         ],
     },
     "warehouse": {
@@ -188,6 +197,11 @@ _ROLE_DEFINITIONS: dict[str, dict] = {
             "warehouse:read",
             # Mark cargo as taken-away with delivery proof photos
             "warehouse:mark_taken",
+            # Deliberately NOT granted cargo:read: that scope exposes the money
+            # fields on /transactions/{id} and its payment events, which this
+            # role's description explicitly rules out.  Everything a warehouse
+            # worker needs (client search, transaction search, cargo photos,
+            # mark-taken) is served by warehouse_router under warehouse:*.
         ],
     },
 }
