@@ -56,5 +56,20 @@ def custom_openapi(app: FastAPI):
                     operation["security"] = []
                 operation["security"].append({"PartnerKeyAuth": []})
 
+    # External Cargo API auth (X-API-Key)
+    openapi_schema["components"]["securitySchemes"]["ExternalCargoAuth"] = {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "External Cargo API key for /external/ endpoints.",
+    }
+
+    for path, path_item in openapi_schema.get("paths", {}).items():
+        if path.startswith("/api/v1/external"):
+            for method, operation in path_item.items():
+                if "security" not in operation:
+                    operation["security"] = []
+                operation["security"].append({"ExternalCargoAuth": []})
+
     app.openapi_schema = openapi_schema
     return app.openapi_schema

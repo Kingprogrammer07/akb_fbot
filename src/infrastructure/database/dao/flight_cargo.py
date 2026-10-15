@@ -273,6 +273,23 @@ class FlightCargoDAO:
         return list(result.scalars().all())
 
     @staticmethod
+    async def count_all_by_client(
+        session: AsyncSession,
+        client_id: str | list[str],
+    ) -> int:
+        """Count all cargo items for a client across all flights."""
+        if isinstance(client_id, list):
+            client_ids_upper = [c.upper() for c in client_id if c]
+            condition = func.upper(FlightCargo.client_id).in_(client_ids_upper)
+        else:
+            condition = func.upper(FlightCargo.client_id) == client_id.upper()
+
+        result = await session.execute(
+            select(func.count(FlightCargo.id)).where(condition)
+        )
+        return result.scalar_one()
+
+    @staticmethod
     async def count_by_flight(
         session: AsyncSession,
         flight_name: str,
