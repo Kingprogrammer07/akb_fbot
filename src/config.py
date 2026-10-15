@@ -281,6 +281,14 @@ class APIConfig(BaseSettings):
         description="Static API key for POST /api/v1/shipment/create",
     )
 
+    # ── External Cargo Read API ────────────────────────────────────────────
+    # Used by webmandarin.uz backend to query flight_cargos.
+    # Set API_EXTERNAL_CARGO_KEY=<random-64-char-hex> in .env
+    EXTERNAL_CARGO_KEY: SecretStr = Field(
+        SecretStr("change-me-generate-a-random-64-char-hex-key"),
+        description="Static API key for GET /api/v1/external/flight-cargos",
+    )
+
     # ── Admin Panel JWT Settings ────────────────────────────────────────────
     # Add these to .env:  API_JWT_SECRET, API_JWT_ALGORITHM, API_JWT_EXPIRE_MINUTES
     # API_ADMIN_PANEL_ORIGIN is required for WebAuthn (e.g. https://admin.example.com)
