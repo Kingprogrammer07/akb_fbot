@@ -288,6 +288,13 @@ class APIConfig(BaseSettings):
         SecretStr("change-me-generate-a-random-64-char-hex-key"),
         description="Static API key for GET /api/v1/external/flight-cargos",
     )
+    # Origin the External Cargo API's photo links start with, e.g.
+    # https://bot.akbcargo.uz. Empty: taken from BOT_WEBHOOK_URL, else from the
+    # request's own host.
+    EXTERNAL_PUBLIC_ORIGIN: str = Field(
+        "",
+        description="https origin of this API for photo links in /api/v1/external",
+    )
 
     # ── Admin Panel JWT Settings ────────────────────────────────────────────
     # Add these to .env:  API_JWT_SECRET, API_JWT_ALGORITHM, API_JWT_EXPIRE_MINUTES

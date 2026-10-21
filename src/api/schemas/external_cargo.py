@@ -23,6 +23,8 @@ class FlightCargoItem(BaseModel):
     is_sent_web_date: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    #: A signed link (at least one hour) per photo, in ``photo_file_ids`` order.
+    photo_urls: list[str] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -41,3 +43,7 @@ class FlightCargoByTrackResponse(FlightCargoListResponse):
     """Response for track-code based queries — adds the resolved track code."""
 
     resolved_from_track_code: str
+    #: The flight the track code is in (``cargo_items.flight_name``).
+    flight_name: str | None = None
+    #: Every track code of this client in that flight: the whole bag.
+    track_codes: list[str] = Field(default_factory=list)

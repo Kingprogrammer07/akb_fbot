@@ -125,6 +125,33 @@ class AsyncS3Manager:
         return url
 
     # ------------------------------------------------------------------ #
+    #  Read
+    # ------------------------------------------------------------------ #
+    async def download_bytes(
+        self, s3_key: str, max_bytes: int
+    ) -> tuple[bytes, str | None] | None:
+        """The object's bytes and stored content type; None if it cannot be read.
+
+        An object larger than ``max_bytes`` is refused rather than cut, so a
+        caller never serves half a picture.
+        """
+        try:
+            async with self._session.client("s3") as s3:
+                response = await s3.get_object(Bucket=self._bucket, Key=s3_key)
+                length = response.get("ContentLength") or 0
+                if length > max_bytes:
+                    logger.warning("S3 object too large to serve: %s (%d bytes)", s3_key, length)
+                    return None
+                async with response["Body"] as body:
+                    data = await body.read()
+        except ClientError as exc:
+            logger.warning("S3 read failed: key=%s error=%s", s3_key, exc)
+            return None
+        if len(data) > max_bytes:
+            return None
+        return data, response.get("ContentType")
+
+    # ------------------------------------------------------------------ #
     #  Delete
     # ------------------------------------------------------------------ #
     async def delete_file(self, s3_key: str) -> bool:

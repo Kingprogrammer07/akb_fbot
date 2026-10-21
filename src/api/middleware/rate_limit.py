@@ -3,7 +3,10 @@
 Policy : 100 requests per 60 seconds per client IP.
 Backend: Uses the shared async Redis pool (``request.app.state.redis``).
 Excludes: /webhook, /static/, /health  — so Telegram updates and asset
-           serving are never throttled.
+           serving are never throttled — and the External Cargo API's signed
+           photo links: a page of partner photos is dozens of requests at
+           once, and a link without a valid signature is refused before any
+           work is done.
 """
 import logging
 from fastapi import Request
@@ -21,7 +24,13 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_KEY_PREFIX = "rate_limit:"
 
 # Paths that should never be rate-limited
-EXCLUDED_PATH_PREFIXES = ("/webhook", "/static/", "/health", "/shipment")
+EXCLUDED_PATH_PREFIXES = (
+    "/webhook",
+    "/static/",
+    "/health",
+    "/shipment",
+    "/api/v1/external/photos/",
+)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
