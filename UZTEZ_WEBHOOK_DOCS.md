@@ -56,7 +56,7 @@ Uztez dasturchilari o'z serverlarida bitta `POST` endpoint ochib berishlari kera
 | `payment_card_number` | `string` yoki `null` | To'lov uchun karta raqami |
 | `payment_card_holder` | `string` yoki `null` | Karta egasining ismi |
 | `items` | `array[CargoItem]` | Yuk ichidagi tovarlar taqsimoti |
-| `photo_urls` | `array[string]` | **Yuk rasmlarining to'g'ridan-to'g'ri havolalari** (S3 presigned URL, 7 kun amal qiladi) |
+| `photo_urls` | `array[string]` | **Yuk rasmlarining to'g'ridan-to'g'ri havolalari** (S3 presigned URL, 60 kun amal qiladi) |
 | `message_text` | `string` | Telegram guruhga yuborilgan hisobot matni |
 
 #### `items` Ichidagi Tovar Obyekti:

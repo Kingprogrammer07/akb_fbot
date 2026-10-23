@@ -259,6 +259,7 @@ class CargoReportData:
     cargo_ids: list[int]
     flight_name: str
     display_flight_name: str = ""
+    raw_photo_ids: list[str] = field(default_factory=list)
     payment_links: list[tuple[str, str]] = field(default_factory=list)
     """Optional list of ``(label, url)`` tuples for online-payment providers
     (Click, Payme, …) supplied via ``partner_payment_methods``.  Rendered
@@ -879,7 +880,7 @@ class BulkCargoSender:
 
                 if not partner.is_dm_partner:
                     if partner.code.upper() == "U":
-                        self._collect_uztez_report(report_data)
+                        await self._collect_uztez_report(report_data)
                     await self._send_to_partner_group(
                         session, partner, client_id, report_data
                     )
@@ -1081,6 +1082,7 @@ class BulkCargoSender:
             foto_hisobot=partner_foto_hisobot,
             photo_file_ids=photo_file_ids,
             cargo_ids=cargo_ids,
+            raw_photo_ids=raw_photo_ids,
             flight_name=self.flight_name,
             display_flight_name=display_flight,
             payment_links=partner_payment_links,
@@ -1420,10 +1422,30 @@ class BulkCargoSender:
                 photo_file_ids=report_data.photo_file_ids,
             )
 
-    def _collect_uztez_report(self, report_data: CargoReportData) -> None:
-        """Collect Uztez cargo report for webhook dispatch."""
+    async def _collect_uztez_report(self, report_data: CargoReportData) -> None:
+        """Collect Uztez cargo report for webhook dispatch with 60-day presigned photo URLs."""
         if not self.uztez_masked_flight and report_data.display_flight_name:
             self.uztez_masked_flight = report_data.display_flight_name
+
+        # Generate 60-day presigned URLs for Uztez (60 * 24 * 3600 seconds)
+        uztez_photo_urls: list[str] = []
+        source_photos = report_data.raw_photo_ids or report_data.photo_file_ids
+        for photo_item in source_photos:
+            if "/" in photo_item and not photo_item.startswith("http"):
+                try:
+                    url = await s3_manager.generate_presigned_url(
+                        photo_item, expires_in=60 * 24 * 3600
+                    )
+                    uztez_photo_urls.append(url)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to generate 60-day presigned URL for %s: %s",
+                        photo_item,
+                        exc,
+                    )
+                    uztez_photo_urls.append(photo_item)
+            else:
+                uztez_photo_urls.append(photo_item)
 
         self.uztez_reports.append(
             {
@@ -1442,7 +1464,7 @@ class BulkCargoSender:
                     }
                     for item in report_data.items
                 ],
-                "photo_urls": list(report_data.photo_file_ids),
+                "photo_urls": uztez_photo_urls,
                 "message_text": report_data.build_message(),
             }
         )

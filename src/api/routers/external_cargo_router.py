@@ -510,7 +510,7 @@ async def get_uztez_flight_reports(
                 for p in raw_photos:
                     if "/" in p:
                         url = await s3_manager.generate_presigned_url(
-                            p, expires_in=7 * 24 * 3600
+                            p, expires_in=60 * 24 * 3600
                         )
                         photo_urls.append(url)
                     else:
