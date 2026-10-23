@@ -20,6 +20,7 @@ photo route takes no key: the link's signature is the proof (see
 ``src/api/utils/external_photo_links.py``). Links start with
 ``API_EXTERNAL_PUBLIC_ORIGIN`` (e.g. ``https://bot.akbcargo.uz``).
 """
+
 from __future__ import annotations
 
 import hmac
@@ -34,11 +35,16 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import json
+
 from src.api.dependencies import get_db, get_redis
 from src.api.schemas.external_cargo import (
     FlightCargoByTrackResponse,
     FlightCargoItem,
     FlightCargoListResponse,
+    UztezCargoItemDetail,
+    UztezClientReport,
+    UztezFlightReportsResponse,
 )
 from src.api.services.telegram_file_service import TelegramFileService
 from src.api.services.verification.utils import parse_photo_file_ids
@@ -50,9 +56,16 @@ from src.api.utils.external_photo_links import (
 from src.bot.bot_instance import bot
 from src.config import config
 from src.infrastructure.database.dao.cargo_item import CargoItemDAO
+from src.infrastructure.database.dao.expected_cargo import ExpectedFlightCargoDAO
 from src.infrastructure.database.dao.flight_cargo import FlightCargoDAO
+from src.infrastructure.database.dao.partner import PartnerDAO
 from src.infrastructure.database.models.cargo_item import CargoItem
 from src.infrastructure.database.models.flight_cargo import FlightCargo
+from src.infrastructure.services.flight_display import (
+    FlightDisplay,
+    resolve_partner_for_codes,
+)
+from src.infrastructure.tools.datetime_utils import get_current_time
 from src.infrastructure.tools.s3_manager import s3_manager
 
 logger = logging.getLogger(__name__)
@@ -282,7 +295,10 @@ async def get_by_client_code(
 
     total = await FlightCargoDAO.count_all_by_client(session, code)
     rows = await FlightCargoDAO.get_all_by_client(
-        session, code, limit=size, offset=offset,
+        session,
+        code,
+        limit=size,
+        offset=offset,
     )
 
     return FlightCargoListResponse(
@@ -318,7 +334,8 @@ async def get_by_track_code(
     session: AsyncSession = Depends(get_db),
 ) -> FlightCargoByTrackResponse:
     cargo_items = await CargoItemDAO.get_by_track_code(
-        session, track_code.strip(),
+        session,
+        track_code.strip(),
     )
     if not cargo_items:
         raise HTTPException(
@@ -340,7 +357,10 @@ async def get_by_track_code(
 
     total = await FlightCargoDAO.count_all_by_client(session, code)
     rows = await FlightCargoDAO.get_all_by_client(
-        session, code, limit=size, offset=offset,
+        session,
+        code,
+        limit=size,
+        offset=offset,
     )
 
     flight_name = (scanned.flight_name or "").strip() or None
@@ -428,4 +448,113 @@ async def get_photo(
             "Cross-Origin-Resource-Policy": "cross-origin",
             "Content-Security-Policy": "default-src 'none'; sandbox",
         },
+    )
+
+
+@router.get(
+    "/partner/uztez/flight-reports",
+    response_model=UztezFlightReportsResponse,
+    summary="Get all cargo reports for Uztez partner in a flight",
+    description=(
+        "Returns all cargo photo reports belonging to Uztez (partner code 'U') "
+        "for the specified flight. Includes both real and masked flight names, "
+        "weights, prices, items, track codes, and presigned photo URLs."
+    ),
+)
+async def get_uztez_flight_reports(
+    flight_name: str = Query(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Real flight name (e.g. M200)",
+    ),
+    _auth: None = Depends(_verify_external_key),
+    session: AsyncSession = Depends(get_db),
+) -> UztezFlightReportsResponse:
+    flight_upper = flight_name.strip().upper()
+    partner = await PartnerDAO.get_by_code(session, "U")
+    if not partner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Uztez partner (code 'U') not found in database.",
+        )
+
+    # 1. Resolve masked flight name
+    masked_flight = await FlightDisplay(partner).label(session, flight_upper)
+
+    # 2. Fetch all cargo rows for this flight
+    all_cargos = await FlightCargoDAO.get_by_flight(session, flight_upper, limit=10000)
+
+    # 3. Filter for Uztez clients
+    client_cargos: dict[str, list] = {}
+    for cargo in all_cargos:
+        c_code = cargo.client_id.strip().upper()
+        p = await resolve_partner_for_codes(session, [c_code])
+        if p and p.code.upper() == "U":
+            client_cargos.setdefault(c_code, []).append(cargo)
+
+    reports: list[UztezClientReport] = []
+    total_flight_weight = 0.0
+
+    for client_id, cargos in client_cargos.items():
+        # Track codes
+        track_codes = await ExpectedFlightCargoDAO.get_track_codes_by_flight_and_client(
+            session, flight_upper, client_id
+        )
+
+        # Photos
+        photo_urls: list[str] = []
+        for cargo in cargos:
+            try:
+                raw_photos = json.loads(cargo.photo_file_ids or "[]")
+                for p in raw_photos:
+                    if "/" in p:
+                        url = await s3_manager.generate_presigned_url(
+                            p, expires_in=7 * 24 * 3600
+                        )
+                        photo_urls.append(url)
+                    else:
+                        photo_urls.append(p)
+            except Exception:
+                continue
+
+        # Items and weights
+        item_details: list[UztezCargoItemDetail] = []
+        client_weight = 0.0
+        for cargo in cargos:
+            w = float(cargo.weight_kg or 0.0)
+            client_weight += w
+            price = float(cargo.price_per_kg or 0.0)
+            item_details.append(
+                UztezCargoItemDetail(
+                    weight=round(w, 2),
+                    price_usd=round(w * price, 2),
+                    price_uzs=0.0,
+                    category="Yuk",
+                )
+            )
+
+        total_flight_weight += client_weight
+        reports.append(
+            UztezClientReport(
+                client_id=client_id,
+                track_codes=track_codes,
+                total_weight=round(client_weight, 2),
+                extra_charge=0.0,
+                items=item_details,
+                photo_urls=photo_urls,
+                message_text="",
+            )
+        )
+
+    return UztezFlightReportsResponse(
+        event="cargo_photos_sent",
+        flight_name=flight_upper,
+        masked_flight_name=masked_flight or flight_upper,
+        partner_code="U",
+        partner_name=partner.display_name,
+        sent_at=get_current_time().isoformat(),
+        total_clients=len(reports),
+        total_weight=round(total_flight_weight, 2),
+        reports=reports,
     )

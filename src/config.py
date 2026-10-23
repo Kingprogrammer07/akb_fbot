@@ -9,26 +9,28 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Historic default for API_JWT_SECRET that shipped in the repository. Anyone who
 # read the source could forge a `role: "super-admin"` token while it was in use,
 # so it is rejected outright rather than silently accepted.
-JWT_SECRET_PLACEHOLDERS = frozenset({
-    'changeme-please-set-a-real-secret-in-env-min-32-chars',
-})
+JWT_SECRET_PLACEHOLDERS = frozenset(
+    {
+        "changeme-please-set-a-real-secret-in-env-min-32-chars",
+    }
+)
 JWT_SECRET_MIN_LENGTH = 32
 
 
 class BotConfig(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix='BOT_', env_file=BASE_DIR / '.env', env_file_encoding='utf-8', extra='ignore'
+        env_prefix="BOT_",
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     TOKEN: SecretStr
     WEBHOOK_URL: str | None = None
     ADMIN_ACCESS_IDs: set[int] | None
-    
+
     # WebApp URLs
-    WEBAPP_BASE_URL: str = Field(
-        'https://example.com',
-        description='WebApp base URL'
-    )
+    WEBAPP_BASE_URL: str = Field("https://example.com", description="WebApp base URL")
 
     @property
     def webapp_register_url(self) -> str:
@@ -53,7 +55,7 @@ class BotConfig(BaseSettings):
     def webapp_client_edit(self, client_id: int) -> str:
         """Get WebApp client edit URL."""
         return f"{self.WEBAPP_BASE_URL}/client/edit/{client_id}"
-        
+
     @property
     def webapp_flights(self) -> str:
         """Get WebApp flights URL."""
@@ -75,148 +77,137 @@ class BotConfig(BaseSettings):
         return f"{self.WEBAPP_BASE_URL}/verification/profile/{client_id}"
 
     # Group and Channel IDs
-    TASDIQLASH_GROUP_ID: int = Field(
-        ...,
-        description='Group ID for approval requests'
-    )
+    TASDIQLASH_GROUP_ID: int = Field(..., description="Group ID for approval requests")
     TASDIQLANGANLAR_CHANNEL_ID: int = Field(
-        ...,
-        description='Channel ID for approved clients'
+        ..., description="Channel ID for approved clients"
     )
     TOLOVLARNI_TASDIQLASH_GROUP_ID: int = Field(
-        -1001000000000,
-        description='Group ID for payment confirmation requests'
+        -1001000000000, description="Group ID for payment confirmation requests"
     )
     TOLOV_TASDIQLANGAN_CHANNEL_ID: int = Field(
-        -1001000000001,
-        description='Channel ID for confirmed payments'
+        -1001000000001, description="Channel ID for confirmed payments"
     )
 
     # Account payments channel (Click/Payme confirmations)
     HISOBGA_TOLOV_CHANNEL_ID: int = Field(
         -1001000000007,
-        description='Channel ID for account payment confirmations (Click/Payme)'
+        description="Channel ID for account payment confirmations (Click/Payme)",
     )
 
     UZPOST_TOLOVLARNI_TASDIQLASH_GROUP_ID: int = Field(
-        -1001000000002,
-        description='Group ID for UZPOST payment confirmation requests'
+        -1001000000002, description="Group ID for UZPOST payment confirmation requests"
     )
-    
+
     UZPOST_DELIVERY_REQUEST_CHANNEL_ID: int = Field(
-        -1001000000003,
-        description='Channel ID for UZPOST delivery requests'
+        -1001000000003, description="Channel ID for UZPOST delivery requests"
     )
 
     AKB_DELIVERY_REQUEST_CHANNEL_ID: int = Field(
-        -1001000000004,
-        description='Channel ID for AKB delivery requests'
+        -1001000000004, description="Channel ID for AKB delivery requests"
     )
 
     YANDEX_DELIVERY_REQUEST_CHANNEL_ID: int = Field(
-        -1001000000005,
-        description='Channel ID for Yandex delivery requests'
+        -1001000000005, description="Channel ID for Yandex delivery requests"
     )
-    
+
     BTS_DELIVERY_REQUEST_CHANNEL_ID: int = Field(
-        -1001000000006,
-        description='Channel ID for BTS delivery requests'
+        -1001000000006, description="Channel ID for BTS delivery requests"
     )
-    
-    
+
     # Foto Hisobot Channel IDs
     FOTO_HISOBOT_SUCCESS_CHANNEL_ID: int = Field(
-        ...,
-        description='Channel ID for successful cargo photo report sends'
+        ..., description="Channel ID for successful cargo photo report sends"
     )
     FOTO_HISOBOT_FAIL_CHANNEL_ID: int = Field(
         ...,
-        description='Channel ID for failed cargo photo report sends (blocked/errors)'
+        description="Channel ID for failed cargo photo report sends (blocked/errors)",
     )
-    
+
     # Database Backup
     DATABASE_BACKUP_CHANNEL_ID: int | None = Field(
-        None,
-        description='Channel ID for automatic daily database backups (optional)'
+        None, description="Channel ID for automatic daily database backups (optional)"
     )
 
     # Wallet-related channels
     REFUND_CHANNEL_ID: int = Field(
-        -1001000000008,
-        description='Channel ID for refund requests from users'
+        -1001000000008, description="Channel ID for refund requests from users"
     )
     DEBT_GROUP_ID: int = Field(
-        -1001000000009,
-        description='Group ID for debt payment confirmations'
+        -1001000000009, description="Group ID for debt payment confirmations"
     )
 
     E_TIJORAT_CHANNEL_ID: int = Field(
-        -1001000000010,
-        description='Channel ID for E-Tijorat requests'
+        -1001000000010, description="Channel ID for E-Tijorat requests"
     )
 
     WAREHOUSE_TAKEN_AWAY_PROVE_GROUP_ID: int = Field(
         -1001000000011,
-        description='Group ID for warehouse taken-away proof notifications (photos + delivery method)'
+        description="Group ID for warehouse taken-away proof notifications (photos + delivery method)",
     )
 
     AKB_XORAZM_FILIALI_GROUP_ID: int = Field(
         -1001000000012,
-        description='Group ID for AKB Xorazm filiali — receives cargo reports for GX-coded clients not registered in the client DB'
+        description="Group ID for AKB Xorazm filiali — receives cargo reports for GX-coded clients not registered in the client DB",
     )
 
     AKB_OSTATKA_GROUP_ID: int = Field(
         -1001000000013,
-        description='Group ID for ostatka (A- prefixed) flights — receives per-client cargo reports and daily leftover statistics'
+        description="Group ID for ostatka (A- prefixed) flights — receives per-client cargo reports and daily leftover statistics",
     )
 
     def get_bot_link(self) -> str:
-        same_name = quote(self.USERNAME, safe='')
-        return f'https://t.me/{same_name}'
+        same_name = quote(self.USERNAME, safe="")
+        return f"https://t.me/{same_name}"
 
 
 class DatabaseConfig(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix='POSTGRES_',
-        env_file=BASE_DIR / '.env',
-        env_file_encoding='utf-8',
-        extra='ignore',
+        env_prefix="POSTGRES_",
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
-    DB: str = Field('postgres', min_length=3)
-    USER: str = Field('postgres', min_length=3)
-    PASSWORD: SecretStr = Field(SecretStr('password'), min_length=8)
+    DB: str = Field("postgres", min_length=3)
+    USER: str = Field("postgres", min_length=3)
+    PASSWORD: SecretStr = Field(SecretStr("password"), min_length=8)
     PORT: int = Field(5432, ge=1024, le=65535)
-    HOST: str = Field('postgres')
-    DRIVER: str = Field('postgresql+asyncpg')
+    HOST: str = Field("postgres")
+    DRIVER: str = Field("postgresql+asyncpg")
 
     @property
     def database_url(self) -> str:
         user = quote(self.USER)
         password = quote(self.PASSWORD.get_secret_value())
-        return f'{self.DRIVER}://{user}:{password}@{self.HOST}:{self.PORT}/{self.DB}'
+        return f"{self.DRIVER}://{user}:{password}@{self.HOST}:{self.PORT}/{self.DB}"
 
 
 class RedisConfig(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix='REDIS_', env_file=BASE_DIR / '.env', env_file_encoding='utf-8', extra='ignore'
+        env_prefix="REDIS_",
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
-    HOST: str = Field('redis')
+    HOST: str = Field("redis")
     PORT: int = Field(6379, ge=1024, le=65535)
     DB: int = Field(0)
     USERNAME: str | None = None
     PASSWORD: SecretStr | None = None
-    TTL: int | None = Field(3600, description='Default TTL in seconds')
+    TTL: int | None = Field(3600, description="Default TTL in seconds")
     MAX_CONNECTIONS: int = Field(10)
     # Bound every Redis round trip so an unreachable server fails requests
     # instead of hanging them. Blocking commands (BLPOP, pub/sub, locks) would
     # need a longer read timeout; the application issues none.
     SOCKET_TIMEOUT: float = Field(
-        5.0, gt=0, allow_inf_nan=False, description='Seconds to wait for a Redis reply'
+        5.0, gt=0, allow_inf_nan=False, description="Seconds to wait for a Redis reply"
     )
     SOCKET_CONNECT_TIMEOUT: float = Field(
-        5.0, gt=0, allow_inf_nan=False, description='Seconds to wait to connect to Redis'
+        5.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Seconds to wait to connect to Redis",
     )
 
     @property
@@ -227,39 +218,47 @@ class RedisConfig(BaseSettings):
         Both parts are percent-encoded with ``safe=''``: the default keeps
         ``/``, which would end the URL authority inside the secret.
         """
-        credentials = quote(self.USERNAME or '', safe='')
+        credentials = quote(self.USERNAME or "", safe="")
         if self.PASSWORD:
-            password = quote(self.PASSWORD.get_secret_value(), safe='')
-            credentials += f':{password}'
+            password = quote(self.PASSWORD.get_secret_value(), safe="")
+            credentials += f":{password}"
         if credentials:
-            credentials += '@'
-        return f'redis://{credentials}{self.HOST}:{self.PORT}/{self.DB}'
+            credentials += "@"
+        return f"redis://{credentials}{self.HOST}:{self.PORT}/{self.DB}"
 
 
 class LoggingConfig(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix='LOG_', env_file=BASE_DIR / '.env', env_file_encoding='utf-8', extra='ignore'
+        env_prefix="LOG_",
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
-    LEVEL: str = Field('DEBUG')
+    LEVEL: str = Field("DEBUG")
     FILE_ENABLED: bool = Field(True)
     BACKUP_COUNT: int = Field(15)
     TELEGRAM_ENABLED: bool = Field(True)
-    @field_validator('LEVEL')
+
+    @field_validator("LEVEL")
     def validate_log_level(cls, value):
-        valid_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if value.upper() not in valid_levels:
-            raise ValueError(f'Log level must be one of {valid_levels}')
+            raise ValueError(f"Log level must be one of {valid_levels}")
         return value.upper()
 
 
 class APIConfig(BaseSettings):
     """API and CORS configuration."""
+
     model_config = SettingsConfigDict(
-        env_prefix='API_', env_file=BASE_DIR / '.env', env_file_encoding='utf-8', extra='ignore'
+        env_prefix="API_",
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
-    HOST: str = Field('0.0.0.0')
+    HOST: str = Field("0.0.0.0")
     PORT: int = Field(8010, ge=1024, le=65535)
 
     # CORS settings
@@ -270,7 +269,10 @@ class APIConfig(BaseSettings):
 
     # Currency Converter API
     CURRENCY_API_KEY: str = Field(
-        default="https://open.er-api.com/v6/latest/USD", min_length=20, description='Currency API key')
+        default="https://open.er-api.com/v6/latest/USD",
+        min_length=20,
+        description="Currency API key",
+    )
 
     # ── China Partner Import API ────────────────────────────────────────────
     # Shared secret for the partner company's shipment creation endpoint.
@@ -296,21 +298,36 @@ class APIConfig(BaseSettings):
         description="https origin of this API for photo links in /api/v1/external",
     )
 
+    # ── Uztez Outgoing Webhook ──────────────────────────────────────────────
+    # Outgoing webhook URL and shared secret for pushing flight cargo reports to Uztez.
+    # Set API_UZTEZ_WEBHOOK_URL=https://... and API_UZTEZ_WEBHOOK_SECRET=... in .env
+    UZTEZ_WEBHOOK_URL: str | None = Field(
+        None,
+        description="Target webhook URL for Uztez cargo reports POST dispatch",
+    )
+    UZTEZ_WEBHOOK_SECRET: SecretStr | None = Field(
+        None,
+        description="Shared secret sent in X-Webhook-Secret header to Uztez",
+    )
+
     # ── Admin Panel JWT Settings ────────────────────────────────────────────
     # Add these to .env:  API_JWT_SECRET, API_JWT_ALGORITHM, API_JWT_EXPIRE_MINUTES
     # API_ADMIN_PANEL_ORIGIN is required for WebAuthn (e.g. https://admin.example.com)
     JWT_SECRET: SecretStr = Field(
         ...,
-        description='Secret key for signing Admin JWT tokens. Required; must be '
-                    'at least 32 characters and must not be a placeholder.'
+        description="Secret key for signing Admin JWT tokens. Required; must be "
+        "at least 32 characters and must not be a placeholder.",
     )
-    JWT_ALGORITHM: str = Field('HS256', description='JWT signing algorithm')
-    JWT_EXPIRE_MINUTES: int = Field(480, ge=5, description='Admin JWT lifetime in minutes (default 8h)')
+    JWT_ALGORITHM: str = Field("HS256", description="JWT signing algorithm")
+    JWT_EXPIRE_MINUTES: int = Field(
+        480, ge=5, description="Admin JWT lifetime in minutes (default 8h)"
+    )
     ADMIN_PANEL_ORIGIN: str | None = Field(
-        None, description='Origin for WebAuthn RP (e.g. https://admin.example.com). Required for passkey endpoints.'
+        None,
+        description="Origin for WebAuthn RP (e.g. https://admin.example.com). Required for passkey endpoints.",
     )
 
-    @field_validator('JWT_SECRET')
+    @field_validator("JWT_SECRET")
     @classmethod
     def _validate_jwt_secret(cls, value: SecretStr) -> SecretStr:
         """
@@ -327,21 +344,21 @@ class APIConfig(BaseSettings):
 
         if not secret:
             raise ValueError(
-                'API_JWT_SECRET is not set. Generate one with '
+                "API_JWT_SECRET is not set. Generate one with "
                 '`python -c "import secrets; print(secrets.token_hex(32))"` '
-                'and add it to .env.'
+                "and add it to .env."
             )
 
         if secret in JWT_SECRET_PLACEHOLDERS:
             raise ValueError(
-                'API_JWT_SECRET is still the placeholder value from the '
-                'repository. It is publicly known; generate a real secret.'
+                "API_JWT_SECRET is still the placeholder value from the "
+                "repository. It is publicly known; generate a real secret."
             )
 
         if len(secret) < JWT_SECRET_MIN_LENGTH:
             raise ValueError(
-                f'API_JWT_SECRET must be at least {JWT_SECRET_MIN_LENGTH} '
-                f'characters (got {len(secret)}).'
+                f"API_JWT_SECRET must be at least {JWT_SECRET_MIN_LENGTH} "
+                f"characters (got {len(secret)})."
             )
 
         return SecretStr(secret)
@@ -349,34 +366,38 @@ class APIConfig(BaseSettings):
 
 class GoogleSheetsConfig(BaseSettings):
     """Google Sheets API configuration."""
+
     model_config = SettingsConfigDict(
-        env_prefix='GOOGLE_SHEETS_',
-        env_file=BASE_DIR / '.env',
-        env_file_encoding='utf-8',
-        extra='ignore'
+        env_prefix="GOOGLE_SHEETS_",
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
-    SHEETS_ID: str = Field(..., min_length=20, description='Google Sheets spreadsheet ID')
-    API_KEY: str = Field(..., min_length=20, description='Google Sheets API key')
+    SHEETS_ID: str = Field(
+        ..., min_length=20, description="Google Sheets spreadsheet ID"
+    )
+    API_KEY: str = Field(..., min_length=20, description="Google Sheets API key")
 
 
 class AWSConfig(BaseSettings):
     """AWS S3 configuration."""
+
     model_config = SettingsConfigDict(
-        env_prefix='AWS_',
-        env_file=BASE_DIR / '.env',
-        env_file_encoding='utf-8',
-        extra='ignore',
+        env_prefix="AWS_",
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
-    ACCESS_KEY_ID: str = Field(..., min_length=10, description='AWS Access Key ID')
-    SECRET_ACCESS_KEY: SecretStr = Field(..., description='AWS Secret Access Key')
-    REGION: str = Field('eu-north-1', description='AWS region')
-    BUCKET_NAME: str = Field('akb-media', description='S3 bucket name')
+    ACCESS_KEY_ID: str = Field(..., min_length=10, description="AWS Access Key ID")
+    SECRET_ACCESS_KEY: SecretStr = Field(..., description="AWS Secret Access Key")
+    REGION: str = Field("eu-north-1", description="AWS region")
+    BUCKET_NAME: str = Field("akb-media", description="S3 bucket name")
 
 
 class Config(BaseSettings):
-    model_config = SettingsConfigDict(env_file_encoding='utf-8', extra='ignore')
+    model_config = SettingsConfigDict(env_file_encoding="utf-8", extra="ignore")
 
     telegram: BotConfig = BotConfig()
     database: DatabaseConfig = DatabaseConfig()

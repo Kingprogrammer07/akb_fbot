@@ -5,7 +5,6 @@ This module handles sending cargo photo reports to multiple clients
 for a specific flight with progress tracking and error handling.
 """
 
-
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
@@ -35,7 +34,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aiogram.fsm.state import State, StatesGroup as _StatesGroupAlias  # noqa: F401  (re-exported below)
+from aiogram.fsm.state import StatesGroup as _StatesGroupAlias  # noqa: F401  (re-exported below)
 from aiogram.types import Message
 
 from src.bot.filters.is_admin import IsAdmin
@@ -314,7 +313,7 @@ class CargoReportData:
         link_info = ""
         if self.payment_links:
             link_lines = "\n".join(
-                f"🌐 <a href=\"{html_module.escape(url, quote=True)}\">"
+                f'🌐 <a href="{html_module.escape(url, quote=True)}">'
                 f"{html_module.escape(label)}</a>"
                 for label, url in self.payment_links
             )
@@ -660,7 +659,7 @@ class ErrorReportGenerator:
 
             os.remove(filename)
 
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to generate error report")
             # Fallback: send text summary
             await self._send_text_fallback(errors, flight_name)
@@ -711,6 +710,8 @@ class BulkCargoSender:
             api_key=config.google_sheets.API_KEY,
             last_n_sheets=5,
         )
+        self.uztez_reports: list[dict[str, Any]] = []
+        self.uztez_masked_flight: str = ""
 
     async def initialize(self, progress_message_id: int) -> bool:
         """Initialize sender with progress reporter."""
@@ -756,7 +757,7 @@ class BulkCargoSender:
                 sheet_names,
             )
             return None
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to resolve sheet name for %s", self.flight_name)
             return None
 
@@ -785,6 +786,10 @@ class BulkCargoSender:
 
                 if self.progress_reporter:
                     await self.progress_reporter.finalize(self.stats)
+
+                # Dispatch Uztez webhook if any Uztez reports were collected
+                if self.uztez_reports:
+                    await self._dispatch_uztez_webhook()
 
                 # Generate error report if there are errors
                 if self.stats.errors:
@@ -856,9 +861,7 @@ class BulkCargoSender:
                 )
                 partner = await resolve_partner_for_codes(
                     session,
-                    _client_for_group.active_codes
-                    if _client_for_group
-                    else client_id,
+                    _client_for_group.active_codes if _client_for_group else client_id,
                 )
 
                 if partner is None:
@@ -875,6 +878,8 @@ class BulkCargoSender:
                     return
 
                 if not partner.is_dm_partner:
+                    if partner.code.upper() == "U":
+                        self._collect_uztez_report(report_data)
                     await self._send_to_partner_group(
                         session, partner, client_id, report_data
                     )
@@ -967,10 +972,10 @@ class BulkCargoSender:
         # into expected_flight_cargos (legacy flights, missing entries, etc.).
         # Deduplication is by normalised upper-case value so the same physical
         # parcel is never listed twice even when both sources know about it.
-        db_track_codes: list[str] = (
-            await ExpectedFlightCargoDAO.get_track_codes_by_flight_and_client(
-                session, self.flight_name, client_id
-            )
+        db_track_codes: list[
+            str
+        ] = await ExpectedFlightCargoDAO.get_track_codes_by_flight_and_client(
+            session, self.flight_name, client_id
         )
 
         sheets_track_codes: list[str] = []
@@ -1013,10 +1018,8 @@ class BulkCargoSender:
         _partner_for_payment = await resolve_partner_for_codes(session, _codes_to_try)
 
         if _partner_for_payment is not None:
-            partner_payment_card = (
-                await PartnerPaymentMethodDAO.get_random_active_card(
-                    session, _partner_for_payment.id
-                )
+            partner_payment_card = await PartnerPaymentMethodDAO.get_random_active_card(
+                session, _partner_for_payment.id
             )
             partner_payment_links = [
                 (link.link_label or "", link.link_url or "")
@@ -1322,9 +1325,7 @@ class BulkCargoSender:
         client = await ClientService().get_client_by_code(
             report_data.client_id, session
         )
-        lookup_codes = (
-            client.active_codes if client else [report_data.client_id]
-        )
+        lookup_codes = client.active_codes if client else [report_data.client_id]
         existing_tx = await ClientTransactionDAO.get_by_client_code_flight(
             session,
             lookup_codes,
@@ -1368,9 +1369,7 @@ class BulkCargoSender:
         """
         group_id = partner.group_chat_id
         if not group_id:
-            error_reason = (
-                f"Partner {partner.code!r} has no group_chat_id configured"
-            )
+            error_reason = f"Partner {partner.code!r} has no group_chat_id configured"
             self.stats.failed += 1
             self.stats.add_error(client_id, self.flight_name, error_reason)
             await self.channel_logger.log_failure(
@@ -1419,6 +1418,69 @@ class BulkCargoSender:
                 f"{partner.display_name} guruhiga yuborishda xato: {error_reason}",
                 message_text=report_data.build_message(),
                 photo_file_ids=report_data.photo_file_ids,
+            )
+
+    def _collect_uztez_report(self, report_data: CargoReportData) -> None:
+        """Collect Uztez cargo report for webhook dispatch."""
+        if not self.uztez_masked_flight and report_data.display_flight_name:
+            self.uztez_masked_flight = report_data.display_flight_name
+
+        self.uztez_reports.append(
+            {
+                "client_id": report_data.client_id,
+                "track_codes": list(report_data.track_codes),
+                "total_weight": float(report_data.total_weight),
+                "extra_charge": float(report_data.extra_charge),
+                "payment_card_number": report_data.payment_card_number,
+                "payment_card_holder": report_data.payment_card_holder,
+                "items": [
+                    {
+                        "weight": float(item.weight),
+                        "price_usd": float(item.price_usd),
+                        "price_uzs": float(item.price_uzs),
+                        "category": item.category,
+                    }
+                    for item in report_data.items
+                ],
+                "photo_urls": list(report_data.photo_file_ids),
+                "message_text": report_data.build_message(),
+            }
+        )
+
+    async def _dispatch_uztez_webhook(self) -> None:
+        """Dispatch accumulated Uztez reports to external webhook if configured."""
+        try:
+            from src.infrastructure.services.uztez_webhook_service import (
+                uztez_webhook_service,
+            )
+            from src.infrastructure.tools.datetime_utils import get_current_time
+
+            payload = {
+                "event": "cargo_photos_sent",
+                "flight_name": self.flight_name,
+                "masked_flight_name": self.uztez_masked_flight or self.flight_name,
+                "partner_code": "U",
+                "partner_name": "Uztez",
+                "sent_at": get_current_time().isoformat(),
+                "total_clients": len(self.uztez_reports),
+                "total_weight": round(
+                    sum(r["total_weight"] for r in self.uztez_reports), 2
+                ),
+                "reports": self.uztez_reports,
+            }
+            delivered = await uztez_webhook_service.send_flight_reports(payload)
+            if delivered:
+                logger.info(
+                    "Uztez webhook dispatched successfully for flight %s (%d reports)",
+                    self.flight_name,
+                    len(self.uztez_reports),
+                )
+        except Exception as e:
+            logger.error(
+                "Error dispatching Uztez webhook for flight %s: %s",
+                self.flight_name,
+                e,
+                exc_info=True,
             )
 
     async def _log_exception(
@@ -1502,20 +1564,38 @@ async def start_bulk_send(
     # can clearly see which flights exist in each system.
     rows: list[list[InlineKeyboardButton]] = []
     if sheets_flights:
-        rows.append([InlineKeyboardButton(text="━━ 📊 Google Sheets ━━", callback_data="noop")])
+        rows.append(
+            [InlineKeyboardButton(text="━━ 📊 Google Sheets ━━", callback_data="noop")]
+        )
         for flight in sheets_flights:
-            rows.append([InlineKeyboardButton(
-                text=f"✈️ {flight}",
-                callback_data=f"bulk_select_flight:{flight}",
-            )])
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"✈️ {flight}",
+                        callback_data=f"bulk_select_flight:{flight}",
+                    )
+                ]
+            )
     if db_flight_names:
-        rows.append([InlineKeyboardButton(text="━━ 🗄 Expected Cargo DB ━━", callback_data="noop")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="━━ 🗄 Expected Cargo DB ━━", callback_data="noop"
+                )
+            ]
+        )
         for flight in db_flight_names:
-            rows.append([InlineKeyboardButton(
-                text=f"✈️ {flight}",
-                callback_data=f"bulk_select_flight:{flight}",
-            )])
-    rows.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data="bulk_cancel")])
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"✈️ {flight}",
+                        callback_data=f"bulk_select_flight:{flight}",
+                    )
+                ]
+            )
+    rows.append(
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="bulk_cancel")]
+    )
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
 
     await callback.message.delete()
@@ -1842,7 +1922,11 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
     )
 
     is_ostatka = is_ostatka_flight(flight_name)
-    header = "♻️ <b>Ostatka yuborish boshlandi...</b>" if is_ostatka else "🚀 <b>Yuborish boshlandi...</b>"
+    header = (
+        "♻️ <b>Ostatka yuborish boshlandi...</b>"
+        if is_ostatka
+        else "🚀 <b>Yuborish boshlandi...</b>"
+    )
 
     # Create progress message
     progress_msg = await callback.message.answer(
@@ -1947,14 +2031,16 @@ async def manual_sent_handler(
         client_cargos = [c for c in cargos if c.client_id == client_id]
         if unsent_ids := [c.id for c in client_cargos if not c.is_sent]:
             await FlightCargoDAO.mark_as_sent(session, unsent_ids)
-            
+
             # --- Qarz yozish logikasi ---
             from src.infrastructure.services.client import ClientService
-            from src.infrastructure.database.dao.client_transaction import ClientTransactionDAO
+            from src.infrastructure.database.dao.client_transaction import (
+                ClientTransactionDAO,
+            )
             from src.bot.utils.currency_converter import currency_converter
             from src.infrastructure.database.dao.static_data import StaticDataDAO
             from src.bot.handlers.admin.bulk_cargo_sender import DEFAULT_USD_TO_UZS_RATE
-            
+
             client = await ClientService().get_client_by_code(client_id, session)
             lookup_codes = client.active_codes if client else [client_id]
             telegram_id = client.telegram_id if client and client.telegram_id else 0
@@ -1963,7 +2049,7 @@ async def manual_sent_handler(
                     "manual_sent_handler: creating debt with telegram_id=0 for client_code=%s",
                     client_id,
                 )
-            
+
             # Kurs va qadoqlash narxini olish
             static_data = await StaticDataDAO.get_first(session)
             extra_charge = float(static_data.extra_charge) if static_data else 0.0
@@ -1980,13 +2066,13 @@ async def manual_sent_handler(
                     p_usd = float(c.price_per_kg or 0)
                     total_weight += w
                     total_price_uzs += (p_usd * rate) * w
-            
+
             total_payment = total_price_uzs + extra_charge
-            
+
             existing_tx = await ClientTransactionDAO.get_by_client_code_flight(
                 session, lookup_codes, flight_name
             )
-            
+
             if not existing_tx:
                 await ClientTransactionDAO.create(
                     session,
@@ -2004,30 +2090,33 @@ async def manual_sent_handler(
                         "remaining_amount": total_payment,
                         "payment_balance_difference": -total_payment,
                         "is_taken_away": False,
-                    }
+                    },
                 )
             else:
-                current_total = float(existing_tx.total_amount or existing_tx.summa or 0)
+                current_total = float(
+                    existing_tx.total_amount or existing_tx.summa or 0
+                )
                 existing_tx.total_amount = current_total + total_payment
-                
+
                 current_remaining = float(existing_tx.remaining_amount or 0)
                 existing_tx.remaining_amount = current_remaining + total_payment
-                
+
                 current_diff = float(existing_tx.payment_balance_difference or 0)
                 existing_tx.payment_balance_difference = current_diff - total_payment
-                
+
                 try:
                     current_vazn = float(existing_tx.vazn) if existing_tx.vazn else 0.0
                 except ValueError:
                     current_vazn = 0.0
                 existing_tx.vazn = str(round(current_vazn + total_weight, 2))
-                
+
                 if existing_tx.payment_status == "paid" and total_payment > 0:
                     existing_tx.payment_status = "partial"
 
             await session.commit()
             await callback.answer(
-                f"✅ {len(unsent_ids)} ta yuk belgilandi va qarz yozildi!", show_alert=True
+                f"✅ {len(unsent_ids)} ta yuk belgilandi va qarz yozildi!",
+                show_alert=True,
             )
         else:
             await callback.answer(
@@ -2036,9 +2125,9 @@ async def manual_sent_handler(
             )
 
         # 2. Edit message to remove button and add "Manually Sent" tag
-        original_text = (
-                    callback.message.html_text or callback.message.caption
-                ) or (callback.message.text or "")
+        original_text = (callback.message.html_text or callback.message.caption) or (
+            callback.message.text or ""
+        )
 
         # Check if already marked (to avoid double edits)
         if "✅ <b>--- Admin tomonidan qo'lda yuborildi ---</b>" in original_text:
@@ -2071,7 +2160,7 @@ async def manual_sent_handler(
             if "message is not modified" not in str(e):
                 logger.warning("Failed to edit manual send message: %s", e)
 
-    except Exception as e:
+    except Exception:
         await session.rollback()
         logger.exception("Manual sent handler error")
         await callback.answer("❌ Xatolik yuz berdi", show_alert=True)
@@ -2111,20 +2200,38 @@ async def start_web_bulk_send(
     # can clearly see which flights exist in each system.
     rows: list[list[InlineKeyboardButton]] = []
     if sheets_flights:
-        rows.append([InlineKeyboardButton(text="━━ 📊 Google Sheets ━━", callback_data="noop")])
+        rows.append(
+            [InlineKeyboardButton(text="━━ 📊 Google Sheets ━━", callback_data="noop")]
+        )
         for flight in sheets_flights:
-            rows.append([InlineKeyboardButton(
-                text=f"✈️ {flight}",
-                callback_data=f"web_select_flight:{flight}",
-            )])
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"✈️ {flight}",
+                        callback_data=f"web_select_flight:{flight}",
+                    )
+                ]
+            )
     if db_flight_names:
-        rows.append([InlineKeyboardButton(text="━━ 🗄 Expected Cargo DB ━━", callback_data="noop")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="━━ 🗄 Expected Cargo DB ━━", callback_data="noop"
+                )
+            ]
+        )
         for flight in db_flight_names:
-            rows.append([InlineKeyboardButton(
-                text=f"✈️ {flight}",
-                callback_data=f"web_select_flight:{flight}",
-            )])
-    rows.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data="bulk_cancel")])
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"✈️ {flight}",
+                        callback_data=f"web_select_flight:{flight}",
+                    )
+                ]
+            )
+    rows.append(
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="bulk_cancel")]
+    )
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
 
     await callback.message.delete()
@@ -2262,9 +2369,9 @@ async def web_confirm_send(
             )
         else:
             text_body = (
-                f"📦 Hurmatli mijoz!\n\n"
-                f"Sizga yangi foto hisobot yuborildi. "
-                f"Hisobotni ko'rish uchun saytimizga kiring."
+                "📦 Hurmatli mijoz!\n\n"
+                "Sizga yangi foto hisobot yuborildi. "
+                "Hisobotni ko'rish uchun saytimizga kiring."
             )
 
         try:

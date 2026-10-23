@@ -1,4 +1,5 @@
 """Response schemas for the External Cargo API."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -47,3 +48,34 @@ class FlightCargoByTrackResponse(FlightCargoListResponse):
     flight_name: str | None = None
     #: Every track code of this client in that flight: the whole bag.
     track_codes: list[str] = Field(default_factory=list)
+
+
+class UztezCargoItemDetail(BaseModel):
+    weight: float
+    price_usd: float
+    price_uzs: float
+    category: str = "Yuk"
+
+
+class UztezClientReport(BaseModel):
+    client_id: str
+    track_codes: list[str] = Field(default_factory=list)
+    total_weight: float
+    extra_charge: float = 0.0
+    payment_card_number: str | None = None
+    payment_card_holder: str | None = None
+    items: list[UztezCargoItemDetail] = Field(default_factory=list)
+    photo_urls: list[str] = Field(default_factory=list)
+    message_text: str = ""
+
+
+class UztezFlightReportsResponse(BaseModel):
+    event: str = "cargo_photos_sent"
+    flight_name: str
+    masked_flight_name: str
+    partner_code: str = "U"
+    partner_name: str = "Uztez"
+    sent_at: str
+    total_clients: int
+    total_weight: float
+    reports: list[UztezClientReport] = Field(default_factory=list)
