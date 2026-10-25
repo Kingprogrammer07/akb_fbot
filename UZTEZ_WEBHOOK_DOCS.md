@@ -50,8 +50,13 @@ Uztez dasturchilari o'z serverlarida bitta `POST` endpoint ochib berishlari kera
 | Maydon | Turi | Tavsif / Qiymat namunasi |
 | :--- | :--- | :--- |
 | `client_id` | `string` | Mijoz kodi (masalan: `"U10025"`) |
-| `track_codes` | `array[string]` | Ushbu mijozning ushbu reysdagi barcha track kodlari ro'yxati |
+| `track_code` | `string` | Barcha trek kodlar vergul bilan birlashtirilgan matn ko'rinishida (`"TRK11, TRK12"`) |
+| `track_codes` | `array[string]` | Ushbu mijozning ushbu reysdagi barcha track kodlari massiv ro'yxati |
 | `total_weight` | `number` | Mijoz yukining umumiy og'irligi kg da (`3.8`) |
+| `total_price_usd` | `number` | Jami to'lov summasi USD da (`30.4`) |
+| `total_price_uzs` | `number` | Jami to'lov summasi UZS (so'm) da (`386000.0`) |
+| `price_usd` | `number` | Jami narx USD da (`30.4`) |
+| `price_uzs` | `number` | Jami narx UZS (so'm) da (`386000.0`) |
 | `extra_charge` | `number` | Qo'shimcha to'lov summasi |
 | `payment_card_number` | `string` yoki `null` | To'lov uchun karta raqami |
 | `payment_card_holder` | `string` yoki `null` | Karta egasining ismi |
@@ -228,8 +233,13 @@ export interface CargoItemDetail {
 
 export interface UztezClientReport {
   client_id: string;
+  track_code: string;
   track_codes: string[];
   total_weight: number;
+  total_price_usd: number;
+  total_price_uzs: number;
+  price_usd: number;
+  price_uzs: number;
   extra_charge: number;
   payment_card_number: string | null;
   payment_card_holder: string | null;

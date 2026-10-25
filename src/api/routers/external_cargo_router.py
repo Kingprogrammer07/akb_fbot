@@ -495,14 +495,53 @@ async def get_uztez_flight_reports(
         if p and p.code.upper() == "U":
             client_cargos.setdefault(c_code, []).append(cargo)
 
+    # 3. Currency conversion rate
+    from src.bot.utils.currency_converter import currency_converter
+
+    try:
+        usd_rate = await currency_converter.get_rate_async(session, "USD", "UZS")
+    except Exception:
+        usd_rate = 12700.0
+
+    # 4. Sheets checker for track codes fallback
+    from src.bot.utils.google_sheets_checker import GoogleSheetsChecker
+
+    sheets_checker = GoogleSheetsChecker(
+        spreadsheet_id=config.google_sheets.SHEETS_ID,
+        api_key=config.google_sheets.API_KEY,
+        last_n_sheets=10,
+    )
+    resolved_sheet_name: str | None = None
+    try:
+        sheet_names = await sheets_checker.get_flight_sheet_names(last_n=10)
+        for sname in sheet_names:
+            if sname.strip().upper().startswith(flight_upper):
+                resolved_sheet_name = sname
+                break
+    except Exception as exc:
+        logger.warning("Failed to resolve sheets for flight %s: %s", flight_upper, exc)
+
     reports: list[UztezClientReport] = []
     total_flight_weight = 0.0
 
     for client_id, cargos in client_cargos.items():
-        # Track codes
+        # Track codes from DB
         track_codes = await ExpectedFlightCargoDAO.get_track_codes_by_flight_and_client(
             session, flight_upper, client_id
         )
+        # If DB had no track codes, fallback to Google Sheets (same as BulkCargoSender)
+        if not track_codes and resolved_sheet_name:
+            try:
+                track_codes = await sheets_checker.get_track_codes_by_flight_and_client(
+                    flight_name=resolved_sheet_name,
+                    client_code=client_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to get track codes from sheets for %s: %s", client_id, exc
+                )
+
+        track_code_str = ", ".join(track_codes) if track_codes else ""
 
         # Photos
         photo_urls: list[str] = []
@@ -523,15 +562,21 @@ async def get_uztez_flight_reports(
         # Items and weights
         item_details: list[UztezCargoItemDetail] = []
         client_weight = 0.0
+        client_price_usd = 0.0
+        client_price_uzs = 0.0
         for cargo in cargos:
             w = float(cargo.weight_kg or 0.0)
             client_weight += w
             price = float(cargo.price_per_kg or 0.0)
+            item_usd = round(w * price, 2)
+            item_uzs = round(item_usd * usd_rate, 2)
+            client_price_usd += item_usd
+            client_price_uzs += item_uzs
             item_details.append(
                 UztezCargoItemDetail(
                     weight=round(w, 2),
-                    price_usd=round(w * price, 2),
-                    price_uzs=0.0,
+                    price_usd=item_usd,
+                    price_uzs=item_uzs,
                     category="Yuk",
                 )
             )
@@ -540,8 +585,13 @@ async def get_uztez_flight_reports(
         reports.append(
             UztezClientReport(
                 client_id=client_id,
+                track_code=track_code_str,
                 track_codes=track_codes,
                 total_weight=round(client_weight, 2),
+                total_price_usd=round(client_price_usd, 2),
+                total_price_uzs=round(client_price_uzs, 2),
+                price_usd=round(client_price_usd, 2),
+                price_uzs=round(client_price_uzs, 2),
                 extra_charge=0.0,
                 items=item_details,
                 photo_urls=photo_urls,

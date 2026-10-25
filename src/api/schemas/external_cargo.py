@@ -59,8 +59,13 @@ class UztezCargoItemDetail(BaseModel):
 
 class UztezClientReport(BaseModel):
     client_id: str
+    track_code: str = ""
     track_codes: list[str] = Field(default_factory=list)
     total_weight: float
+    total_price_usd: float = 0.0
+    total_price_uzs: float = 0.0
+    price_usd: float = 0.0
+    price_uzs: float = 0.0
     extra_charge: float = 0.0
     payment_card_number: str | None = None
     payment_card_holder: str | None = None

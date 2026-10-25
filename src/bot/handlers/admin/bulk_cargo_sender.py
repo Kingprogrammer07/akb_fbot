@@ -1447,11 +1447,22 @@ class BulkCargoSender:
             else:
                 uztez_photo_urls.append(photo_item)
 
+        total_price_usd = sum(item.price_usd for item in report_data.items)
+        total_price_uzs = sum(item.price_uzs for item in report_data.items)
+        track_code_str = (
+            ", ".join(report_data.track_codes) if report_data.track_codes else ""
+        )
+
         self.uztez_reports.append(
             {
                 "client_id": report_data.client_id,
+                "track_code": track_code_str,
                 "track_codes": list(report_data.track_codes),
                 "total_weight": float(report_data.total_weight),
+                "total_price_usd": round(total_price_usd, 2),
+                "total_price_uzs": round(total_price_uzs, 2),
+                "price_usd": round(total_price_usd, 2),
+                "price_uzs": round(total_price_uzs, 2),
                 "extra_charge": float(report_data.extra_charge),
                 "payment_card_number": report_data.payment_card_number,
                 "payment_card_holder": report_data.payment_card_holder,
