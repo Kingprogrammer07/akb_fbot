@@ -152,9 +152,59 @@ Content-Type: application/json
 
 ---
 
-## 6. Qo'shimcha Pull Endpoint (Zaxira / Test uchun)
+## 6. Qo'shimcha Pull Endpointlar (Zaxira / Integratsiya uchun)
 
-Agar Uztez dasturchilari xohlasa, istalgan vaqtda ma'lumotlarni o'zlari `GET` so'rovi orqali ham olishlari mumkin:
+### 6.1. Reyslar Ro'yxatini Pagination Bilan Olish
+
+Uztez o'ziga tegishli barcha reyslar ro'yxatini (haqiqiy va maskalangan nomlari, mijozlar soni, jami og'irlik va sanalari bilan) sahifalab (pagination) olishi mumkin:
+
+```http
+GET /api/v1/external/partner/uztez/flights?page=1&size=20 HTTP/1.1
+Host: <akb-domain>
+X-API-Key: <EXTERNAL_API_KEY>
+```
+
+#### Query Parametrlar:
+| Parametr | Turi | Standart | Tavsif |
+| :--- | :--- | :--- | :--- |
+| `page` | `integer` | `1` | Sahifa raqami (1 dan boshlanadi) |
+| `size` | `integer` | `20` | Har bir sahifadagi reyslar soni (maksimum 100) |
+| `search` | `string` | `null` | Reys nomi bo'yicha qidiruv filtri (masalan: `303` yoki `M303`) |
+| `only_uztez` | `boolean` | `true` | `true` bo'lsa faqat Uztez yuki bor reyslar, `false` bo'lsa barcha reyslar |
+
+#### Response JSON Namunasi:
+```json
+{
+  "items": [
+    {
+      "flight_name": "M307",
+      "masked_flight_name": "U107.",
+      "clients_count": 2,
+      "cargos_count": 2,
+      "total_weight": 0.14,
+      "latest_cargo_date": "2026-10-19T14:50:41.550194Z"
+    },
+    {
+      "flight_name": "M305-M306",
+      "masked_flight_name": "U105-U106",
+      "clients_count": 7,
+      "cargos_count": 7,
+      "total_weight": 7.58,
+      "latest_cargo_date": "2026-10-17T14:25:06.999429Z"
+    }
+  ],
+  "total": 41,
+  "page": 1,
+  "size": 20,
+  "total_pages": 3
+}
+```
+
+---
+
+### 6.2. Bitta Reys Bo'yicha Barcha Foto Hisobotlarni Olish
+
+Muayyan reys kodi (`flight_name`) bo'yicha barcha foto hisobotlarni tortib olish:
 
 ```http
 GET /api/v1/external/partner/uztez/flight-reports?flight_name=M200 HTTP/1.1
@@ -162,7 +212,7 @@ Host: <akb-domain>
 X-API-Key: <EXTERNAL_API_KEY>
 ```
 
-Ushbu endpoint ham yuqoridagi Webhook payload bilan 100% bir xil formatda JSON qaytaradi.
+Ushbu endpoint ham 3-bo'limdagi Webhook payload bilan 100% bir xil formatda JSON qaytaradi.
 
 ---
 
@@ -198,5 +248,22 @@ export interface UztezCargoWebhookPayload {
   total_clients: number;
   total_weight: number;
   reports: UztezClientReport[];
+}
+
+export interface UztezFlightListItem {
+  flight_name: string;
+  masked_flight_name: string;
+  clients_count: number;
+  cargos_count: number;
+  total_weight: number;
+  latest_cargo_date: string | null;
+}
+
+export interface UztezFlightListResponse {
+  items: UztezFlightListItem[];
+  total: number;
+  page: number;
+  size: number;
+  total_pages: number;
 }
 ```

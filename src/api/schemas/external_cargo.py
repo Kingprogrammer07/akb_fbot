@@ -79,3 +79,20 @@ class UztezFlightReportsResponse(BaseModel):
     total_clients: int
     total_weight: float
     reports: list[UztezClientReport] = Field(default_factory=list)
+
+
+class UztezFlightListItem(BaseModel):
+    flight_name: str
+    masked_flight_name: str
+    clients_count: int
+    cargos_count: int
+    total_weight: float
+    latest_cargo_date: datetime | None = None
+
+
+class UztezFlightListResponse(BaseModel):
+    items: list[UztezFlightListItem]
+    total: int
+    page: int = Field(ge=1)
+    size: int = Field(ge=1, le=100)
+    total_pages: int

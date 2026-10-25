@@ -738,3 +738,70 @@ class FlightCargoDAO:
 
         result = await session.execute(query)
         return list(result.scalars().all())
+
+    @staticmethod
+    async def get_uztez_flights(
+        session: AsyncSession,
+        limit: int = 20,
+        offset: int = 0,
+        search: Optional[str] = None,
+        only_uztez: bool = True,
+    ) -> tuple[list[dict], int]:
+        """
+        Get paginated distinct flights containing Uztez cargo (or all flights).
+
+        Args:
+            session: AsyncSession
+            limit: Maximum items to return
+            offset: Number of items to skip
+            search: Optional search substring for flight name
+            only_uztez: If True, only flights with client_id like 'U%'
+
+        Returns:
+            Tuple of (list of dicts with flight stats, total matching count)
+        """
+        from sqlalchemy import and_, desc, true
+
+        conditions = []
+        if only_uztez:
+            conditions.append(func.upper(FlightCargo.client_id).like("U%"))
+        if search and search.strip():
+            clean_search = f"%{search.strip().upper()}%"
+            conditions.append(func.upper(FlightCargo.flight_name).like(clean_search))
+
+        where_clause = and_(*conditions) if conditions else true()
+
+        count_stmt = select(func.count(func.distinct(FlightCargo.flight_name))).where(
+            where_clause
+        )
+        total = (await session.execute(count_stmt)).scalar() or 0
+
+        if total == 0:
+            return [], 0
+
+        stmt = (
+            select(
+                FlightCargo.flight_name,
+                func.count(func.distinct(FlightCargo.client_id)).label("clients_count"),
+                func.count(FlightCargo.id).label("cargos_count"),
+                func.coalesce(func.sum(FlightCargo.weight_kg), 0).label("total_weight"),
+                func.max(FlightCargo.created_at).label("latest_cargo_date"),
+            )
+            .where(where_clause)
+            .group_by(FlightCargo.flight_name)
+            .order_by(desc("latest_cargo_date"))
+            .offset(offset)
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        rows = [
+            {
+                "flight_name": r.flight_name,
+                "clients_count": int(r.clients_count),
+                "cargos_count": int(r.cargos_count),
+                "total_weight": round(float(r.total_weight), 2),
+                "latest_cargo_date": r.latest_cargo_date,
+            }
+            for r in result.all()
+        ]
+        return rows, total

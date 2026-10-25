@@ -44,6 +44,8 @@ from src.api.schemas.external_cargo import (
     FlightCargoListResponse,
     UztezCargoItemDetail,
     UztezClientReport,
+    UztezFlightListItem,
+    UztezFlightListResponse,
     UztezFlightReportsResponse,
 )
 from src.api.services.telegram_file_service import TelegramFileService
@@ -557,4 +559,67 @@ async def get_uztez_flight_reports(
         total_clients=len(reports),
         total_weight=round(total_flight_weight, 2),
         reports=reports,
+    )
+
+
+@router.get(
+    "/partner/uztez/flights",
+    response_model=UztezFlightListResponse,
+    summary="Get paginated list of flights containing Uztez cargos",
+    description=(
+        "Returns a paginated list of flights from flight_cargos that contain "
+        "cargo belonging to Uztez (partner code 'U'). Includes real and masked "
+        "flight names, client counts, total weight, and cargo dates."
+    ),
+)
+async def get_uztez_flights(
+    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
+    size: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
+    search: str | None = Query(None, description="Optional flight name search filter"),
+    only_uztez: bool = Query(
+        True,
+        description="If true, only returns flights containing Uztez cargo. If false, returns all flights.",
+    ),
+    _auth: None = Depends(_verify_external_key),
+    session: AsyncSession = Depends(get_db),
+) -> UztezFlightListResponse:
+    partner = await PartnerDAO.get_by_code(session, "U")
+    if not partner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Uztez partner (code 'U') not found in database.",
+        )
+
+    offset = (page - 1) * size
+    raw_rows, total = await FlightCargoDAO.get_uztez_flights(
+        session,
+        limit=size,
+        offset=offset,
+        search=search,
+        only_uztez=only_uztez,
+    )
+
+    flight_display = FlightDisplay(partner)
+    items: list[UztezFlightListItem] = []
+    for r in raw_rows:
+        masked = await flight_display.label(session, r["flight_name"])
+        items.append(
+            UztezFlightListItem(
+                flight_name=r["flight_name"],
+                masked_flight_name=masked or r["flight_name"],
+                clients_count=r["clients_count"],
+                cargos_count=r["cargos_count"],
+                total_weight=r["total_weight"],
+                latest_cargo_date=r["latest_cargo_date"],
+            )
+        )
+
+    total_pages = (total + size - 1) // size if total > 0 else 0
+
+    return UztezFlightListResponse(
+        items=items,
+        total=total,
+        page=page,
+        size=size,
+        total_pages=total_pages,
     )
